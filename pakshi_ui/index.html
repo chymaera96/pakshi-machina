@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pakshi Machina</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <p class="eyebrow">Pakshi Machina</p>
+        <h1>Segmented Phrase Retrieval</h1>
+        <p class="summary">
+          VAD-defined singing phrases are sliced into 2 second segments. Each segment retrieves one nearest sound.
+        </p>
+      </section>
+
+      <section class="controls">
+        <button id="load-corpus">Load Demo Corpus</button>
+        <button id="arm-worker">Arm</button>
+        <button id="disarm-worker">Disarm</button>
+        <button id="stop-all">Stop</button>
+        <button id="refresh-state">Refresh State</button>
+        <label>
+          Bundle directory
+          <input id="bundle-dir" type="text" value="./pakshi_demo_bundle" />
+        </label>
+      </section>
+
+      <section class="status-grid">
+        <article class="panel">
+          <h2>State</h2>
+          <div id="state-pill" class="pill">idle</div>
+          <p id="boot-info" class="microcopy"></p>
+          <pre id="state-json"></pre>
+        </article>
+        <article class="panel">
+          <h2>Segments</h2>
+          <ol id="segments-list"></ol>
+        </article>
+        <article class="panel">
+          <h2>Playback</h2>
+          <ol id="playback-list"></ol>
+        </article>
+        <article class="panel span-2">
+          <h2>Notes</h2>
+          <p class="microcopy">
+            Set <code>PAKSHI_MODEL_PATH</code> before launching Electron, or place a model at
+            <code>models/model.onnx</code>. Optional startup env vars:
+            <code>PAKSHI_BUNDLE_PATH</code>, <code>PAKSHI_PYTHON_PATH</code>,
+            <code>PAKSHI_ARM_ON_BOOT=1</code>.
+          </p>
+        </article>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+  </html>

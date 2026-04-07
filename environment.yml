@@ -1,0 +1,18 @@
+name: pakshi-machina
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg=6.*
+  - libsndfile
+  - sox
+  - pip:
+      - librosa==0.11.0
+      - numpy==2.0.2
+      - onnxruntime==1.19.2
+      - faiss-cpu==1.12.0
+      - sounddevice==0.5.3
+      - soundfile==0.13.1
+      - torch==2.9.1
+      - torchcrepe==0.0.24

@@ -1,0 +1,14 @@
+{
+  "name": "pakshi-machina-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron control surface for Pakshi segmented phrase retrieval.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:trace": "ELECTRON_ENABLE_LOGGING=1 electron ."
+  },
+  "dependencies": {
+    "electron": "^37.2.0"
+  }
+}
