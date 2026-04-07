@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlayer, build_confidence_estimator
+from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlayer, build_level_estimator
 from .config import RuntimeConfig
 from .corpus import CorpusBundle, load_corpus_bundle
 from .retrieval import OnnxEmbeddingModel, RetrievalEngine
@@ -26,18 +26,27 @@ class SegmentedPhraseWorker:
         self.corpus: Optional[CorpusBundle] = None
         self.retrieval: Optional[RetrievalEngine] = None
         self.armed = False
+        self.calibrated = False
         self._player = self._build_player()
         self._last_state = "idle"
         self._mic: Optional[LiveInputStream] = None
-        self._confidence = build_confidence_estimator(self.config.sample_rate)
+        self._level_estimator = build_level_estimator()
         self._stream_started_at: Optional[float] = None
-        self._smoothed_confidence = 0.0
-        self.calibrated = False
-        self._calibrating = False
-        self._calibration_phrase_target = 3
-        self._calibration_phrase_count = 0
-        self._calibration_confidences: List[float] = []
-        self._calibration_segmenter = self._make_calibration_segmenter()
+        self._smoothed_level_db = self.config.meter_floor_db
+
+        self.setup_mode = False
+        self._setup_stage = "idle"
+        self._capture_started_at: Optional[float] = None
+        self._room_noise_levels: List[float] = []
+        self._singing_levels: List[float] = []
+        self.noise_floor_db: Optional[float] = None
+        self.singing_soft_db: Optional[float] = None
+        self.singing_median_db: Optional[float] = None
+        self._candidate_gate_open_db: Optional[float] = None
+        self._candidate_gate_close_db: Optional[float] = None
+        self._resume_after_playback = False
+        self._active_playback_phrase_id: Optional[int] = None
+        self._active_playback_last_index: Optional[int] = None
 
     def _build_player(self):
         try:
@@ -63,13 +72,18 @@ class SegmentedPhraseWorker:
             self.retrieval = RetrievalEngine(self.embedder, self.corpus.index, self.corpus.metadata)
             return [self._state_event("idle")]
         if kind == "set_params":
-            params = command.get("params", {})
-            self._apply_params(params)
-            return [self._state_event("idle")]
+            self._apply_params(command.get("params", {}))
+            return [self._state_event(self._last_state)]
+        if kind == "start_setup":
+            return self._start_setup()
+        if kind == "capture_noise_floor":
+            return self._capture_noise_floor()
+        if kind == "capture_singing_level":
+            return self._capture_singing_level()
+        if kind == "reset_setup":
+            return self._reset_setup()
         if kind == "arm":
             return self._arm_worker()
-        if kind == "start_calibration":
-            return self._start_calibration()
         if kind == "disarm":
             return self._disarm_worker()
         if kind == "stop_all":
@@ -83,57 +97,103 @@ class SegmentedPhraseWorker:
             if not self.armed:
                 return []
             frame = np.asarray(command["frame"], dtype=np.float32)
-            confidence = float(command["confidence"])
+            level_db = float(command.get("level_db", self._level_estimator.estimate_db(frame)))
             now_seconds = command.get("now_seconds")
-            return self._handle_frame(frame, confidence, now_seconds=now_seconds)
+            return self._handle_frame(frame, level_db, now_seconds=now_seconds)
         if kind == "process_phrase":
             if not self.armed:
                 return []
             phrase = np.asarray(command["waveform"], dtype=np.float32)
-            confidence = float(command.get("confidence", 1.0))
-            return self._process_phrase_offline(phrase, confidence)
+            level_db = float(command.get("level_db", self._level_estimator.estimate_db(phrase)))
+            return self._process_phrase_offline(phrase, level_db)
         raise ValueError(f"Unknown command: {kind}")
 
     def _apply_params(self, params: Dict[str, Any]) -> None:
         for key, value in params.items():
-            if not hasattr(self.config, key):
-                continue
-            setattr(self.config, key, value)
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
         self.segmenter = PhraseSegmenter(self.config)
-        self._calibration_segmenter = self._make_calibration_segmenter()
         self._player = self._build_player()
-        self._confidence = build_confidence_estimator(self.config.sample_rate)
-        self._smoothed_confidence = 0.0
-        if self.armed:
+        self._smoothed_level_db = self.config.meter_floor_db
+        self._level_estimator = build_level_estimator()
+        if self.armed or self._setup_stage in {"capture_noise", "capture_singing"}:
             self._stop_mic()
             self._start_mic()
 
+    def _start_setup(self) -> List[Dict[str, Any]]:
+        self.armed = False
+        self._player.clear()
+        self.setup_mode = True
+        self.calibrated = False
+        self._setup_stage = "setup"
+        self._capture_started_at = None
+        self._room_noise_levels = []
+        self._singing_levels = []
+        self.noise_floor_db = None
+        self.singing_soft_db = None
+        self.singing_median_db = None
+        self._candidate_gate_open_db = None
+        self._candidate_gate_close_db = None
+        self._stop_mic()
+        return [{"type": "setup_started"}, self._state_event("setup")]
+
+    def _capture_noise_floor(self) -> List[Dict[str, Any]]:
+        if not self.setup_mode:
+            self._start_setup()
+        self._setup_stage = "capture_noise"
+        self._capture_started_at = None
+        self._room_noise_levels = []
+        self._start_mic()
+        return [
+            {"type": "noise_floor_capture_started", "duration_seconds": self.config.calibration_noise_seconds},
+            self._state_event("setup"),
+        ]
+
+    def _capture_singing_level(self) -> List[Dict[str, Any]]:
+        if self.noise_floor_db is None:
+            raise RuntimeError("Capture Noise Floor first.")
+        self._setup_stage = "capture_singing"
+        self._capture_started_at = None
+        self._singing_levels = []
+        self._start_mic()
+        return [
+            {"type": "singing_level_capture_started", "duration_seconds": self.config.calibration_singing_seconds},
+            self._state_event("setup"),
+        ]
+
+    def _reset_setup(self) -> List[Dict[str, Any]]:
+        self.armed = False
+        self.setup_mode = True
+        self.calibrated = False
+        self._setup_stage = "setup"
+        self._capture_started_at = None
+        self._room_noise_levels = []
+        self._singing_levels = []
+        self.noise_floor_db = None
+        self.singing_soft_db = None
+        self.singing_median_db = None
+        self._candidate_gate_open_db = None
+        self._candidate_gate_close_db = None
+        self._player.clear()
+        self.segmenter = PhraseSegmenter(self.config)
+        self._stop_mic()
+        return [{"type": "setup_reset"}, self._state_event("setup")]
+
     def _arm_worker(self) -> List[Dict[str, Any]]:
         if not self.calibrated:
-            raise RuntimeError("Calibration required before arming. Run the 3-phrase calibration first.")
+            raise RuntimeError("Setup must be completed before arming.")
+        self.setup_mode = False
+        self._setup_stage = "idle"
         self.armed = True
         self._start_mic()
         return [self._state_event("listening")]
 
-    def _start_calibration(self) -> List[Dict[str, Any]]:
-        self.armed = False
-        self._calibrating = True
-        self._calibration_phrase_count = 0
-        self._calibration_confidences = []
-        self._calibration_segmenter = self._make_calibration_segmenter()
-        self._start_mic()
-        return [{"type": "calibration_started", "target_phrases": self._calibration_phrase_target}, self._state_event("calibrating")]
-
     def _disarm_worker(self) -> List[Dict[str, Any]]:
         self.armed = False
-        self._calibrating = False
-        self._calibration_phrase_count = 0
-        self._calibration_confidences = []
-        self.segmenter = PhraseSegmenter(self.config)
-        self._calibration_segmenter = self._make_calibration_segmenter()
         self._player.clear()
+        self.segmenter = PhraseSegmenter(self.config)
         self._stop_mic()
-        return [self._state_event("idle")]
+        return [self._state_event("idle"), {"type": "queue_cleared"}]
 
     def _clear_queue_restart(self) -> List[Dict[str, Any]]:
         self._player.clear()
@@ -143,19 +203,15 @@ class SegmentedPhraseWorker:
             self._stop_mic()
             self._start_mic()
             events.append(self._state_event("listening"))
-        elif self._calibrating:
-            self._stop_mic()
-            self._start_mic()
-            events.append(self._state_event("calibrating"))
         else:
-            events.append(self._state_event("idle"))
+            events.append(self._state_event(self._last_state))
         return events
 
     def _start_mic(self) -> None:
         if self._mic is not None and self._mic.active:
             return
         self._stream_started_at = time.time()
-        self._smoothed_confidence = 0.0
+        self._smoothed_level_db = self.config.meter_floor_db
         self._mic = LiveInputStream(
             sample_rate=self.config.sample_rate,
             frame_samples=self.config.input_frame_samples(),
@@ -172,90 +228,138 @@ class SegmentedPhraseWorker:
             self.emit({"type": "mic_status", "active": False})
 
     def _handle_live_frame(self, frame: np.ndarray, timestamp: float) -> None:
-        confidence = float(self._confidence.estimate(frame))
-        alpha = float(np.clip(self.config.confidence_smoothing, 0.0, 0.999))
-        self._smoothed_confidence = alpha * self._smoothed_confidence + (1.0 - alpha) * confidence
-        if self._calibrating:
-            self._handle_calibration_frame(frame, confidence, timestamp)
+        level_db = float(self._level_estimator.estimate_db(frame))
+        alpha = float(np.clip(self.config.envelope_smoothing, 0.0, 0.999))
+        self._smoothed_level_db = alpha * self._smoothed_level_db + (1.0 - alpha) * level_db
+        self.emit(self._meter_event(level_db, self._smoothed_level_db))
+
+        if self._setup_stage == "capture_noise":
+            self._handle_noise_capture(level_db, timestamp)
+            return
+        if self._setup_stage == "capture_singing":
+            self._handle_singing_capture(level_db, timestamp)
             return
         if not self.armed:
             return
-        level = float(np.sqrt(np.mean(np.square(frame)))) if frame.size else 0.0
-        now_seconds = (
-            timestamp - self._stream_started_at if self._stream_started_at is not None else None
-        )
+
+        now_seconds = timestamp - self._stream_started_at if self._stream_started_at is not None else None
+        for event in self._handle_frame(frame, self._smoothed_level_db, now_seconds=now_seconds):
+            self.emit(event)
+
+    def _handle_noise_capture(self, level_db: float, timestamp: float) -> None:
+        if self._capture_started_at is None:
+            self._capture_started_at = timestamp
+        self._room_noise_levels.append(level_db)
+        elapsed = (timestamp - self._capture_started_at) + 1e-9
+        if elapsed < self.config.calibration_noise_seconds:
+            return
+        self.noise_floor_db = float(np.percentile(self._room_noise_levels, 95))
+        self._capture_started_at = None
+        self._setup_stage = "setup"
+        self._stop_mic()
+        self.emit({"type": "noise_floor_captured", "noise_floor_db": self.noise_floor_db})
+        self.emit(self._state_event("setup"))
+
+    def _handle_singing_capture(self, level_db: float, timestamp: float) -> None:
+        if self._capture_started_at is None:
+            self._capture_started_at = timestamp
+        self._singing_levels.append(level_db)
+        elapsed = (timestamp - self._capture_started_at) + 1e-9
+        if elapsed < self.config.calibration_singing_seconds:
+            return
+        self._capture_started_at = None
+        self._setup_stage = "setup"
+        self._stop_mic()
+        try:
+            payload = self._derive_gate_from_singing()
+            self.emit(payload)
+            self._commit_setup()
+        except RuntimeError as exc:
+            self.emit({"type": "setup_error", "message": str(exc)})
+        self.emit(self._state_event("setup"))
+
+    def _derive_gate_from_singing(self) -> Dict[str, Any]:
+        if self.noise_floor_db is None:
+            raise RuntimeError("Noise floor is not available.")
+        voiced = [level for level in self._singing_levels if level >= self.noise_floor_db + 3.0]
+        if len(voiced) < 5:
+            raise RuntimeError("Not enough performance-level singing was captured.")
+
+        self.singing_soft_db = float(np.percentile(voiced, 20))
+        self.singing_median_db = float(np.percentile(voiced, 50))
+        separation_db = self.singing_soft_db - self.noise_floor_db
+        if separation_db < self.config.calibration_min_separation_db:
+            raise RuntimeError(f"Singing/noise separation too small ({separation_db:.1f} dB).")
+
+        gate_open_db = max(self.noise_floor_db + 3.0, min(self.singing_soft_db - 1.5, self.noise_floor_db + separation_db * 0.4))
+        gate_open_db = min(gate_open_db, self.singing_soft_db)
+        gate_close_db = max(self.noise_floor_db + 1.5, gate_open_db - 6.0)
+        self._candidate_gate_open_db = float(gate_open_db)
+        self._candidate_gate_close_db = float(gate_close_db)
+        return {
+            "type": "singing_level_captured",
+            "singing_soft_db": self.singing_soft_db,
+            "singing_median_db": self.singing_median_db,
+            "gate_open_db": self._candidate_gate_open_db,
+            "gate_close_db": self._candidate_gate_close_db,
+        }
+
+    def _commit_setup(self) -> None:
+        if self._candidate_gate_open_db is None or self._candidate_gate_close_db is None:
+            return
+        self.config.gate_open_db = float(self._candidate_gate_open_db)
+        self.config.gate_close_db = float(self._candidate_gate_close_db)
+        self.segmenter = PhraseSegmenter(self.config)
+        self.calibrated = True
+        self.setup_mode = False
+        self._setup_stage = "idle"
         self.emit(
             {
-                "type": "mic_level",
-                "level": level,
-                "confidence": self._smoothed_confidence,
-                "raw_confidence": confidence,
+                "type": "setup_ready",
+                "noise_floor_db": self.noise_floor_db,
+                "singing_soft_db": self.singing_soft_db,
+                "singing_median_db": self.singing_median_db,
+                "gate_open_db": self.config.gate_open_db,
+                "gate_close_db": self.config.gate_close_db,
             }
         )
-        for event in self._handle_frame(frame, self._smoothed_confidence, now_seconds=now_seconds):
-            self.emit(event)
+
+    def _meter_event(self, level_db: float, envelope_db: float) -> Dict[str, Any]:
+        gate_open_db = self._candidate_gate_open_db if self._candidate_gate_open_db is not None else self.config.gate_open_db
+        gate_close_db = self._candidate_gate_close_db if self._candidate_gate_close_db is not None else self.config.gate_close_db
+        if envelope_db >= gate_open_db:
+            gate_state = "open"
+        elif envelope_db >= gate_close_db:
+            gate_state = "arming"
+        else:
+            gate_state = "below"
+        return {
+            "type": "mic_level",
+            "level_db": level_db,
+            "envelope_db": envelope_db,
+            "gate_state": gate_state,
+            "gate_open_db": gate_open_db,
+            "gate_close_db": gate_close_db,
+        }
 
     def _handle_mic_error(self, message: str) -> None:
         self.emit({"type": "error", "message": message})
 
-    def _make_calibration_segmenter(self) -> PhraseSegmenter:
-        cfg = RuntimeConfig(**asdict(self.config))
-        cfg.onset_threshold = min(cfg.onset_threshold, 0.2)
-        cfg.sustain_threshold = min(cfg.sustain_threshold, 0.12)
-        cfg.release_seconds = max(cfg.release_seconds, 0.35)
-        return PhraseSegmenter(cfg)
-
-    def _handle_calibration_frame(self, frame: np.ndarray, confidence: float, timestamp: float) -> None:
-        self._calibration_confidences.append(confidence)
-        now_seconds = (
-            timestamp - self._stream_started_at if self._stream_started_at is not None else None
-        )
-        events = self._calibration_segmenter.process_frame(frame, confidence, now_seconds=now_seconds)
-        for event in events:
-            if event["type"] == "phrase_ended":
-                self._calibration_phrase_count += 1
-                self.emit(
-                    {
-                        "type": "calibration_progress",
-                        "phrase_count": self._calibration_phrase_count,
-                        "target_phrases": self._calibration_phrase_target,
-                    }
-                )
-                if self._calibration_phrase_count >= self._calibration_phrase_target:
-                    self._finish_calibration()
-                    return
-
-    def _finish_calibration(self) -> None:
-        voiced = [x for x in self._calibration_confidences if x > 0.1]
-        if voiced:
-            onset = float(np.clip(np.percentile(voiced, 65), 0.18, 0.85))
-            sustain = float(np.clip(onset * 0.7, 0.12, onset - 0.05))
-            self.config.onset_threshold = onset
-            self.config.sustain_threshold = sustain
-        self.calibrated = True
-        self._calibrating = False
-        self._calibration_segmenter = self._make_calibration_segmenter()
-        self._stop_mic()
-        self.emit(
-            {
-                "type": "calibration_complete",
-                "phrase_count": self._calibration_phrase_count,
-                "onset_threshold": self.config.onset_threshold,
-                "sustain_threshold": self.config.sustain_threshold,
-            }
-        )
-        self.emit(self._state_event("idle"))
-
-    def _handle_frame(self, frame: np.ndarray, confidence: float, *, now_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
-        events = self.segmenter.process_frame(frame, confidence, now_seconds=now_seconds)
+    def _handle_frame(self, frame: np.ndarray, level_db: float, *, now_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
+        events = self.segmenter.process_frame(frame, level_db, now_seconds=now_seconds)
         return self._expand_events(events)
 
-    def _process_phrase_offline(self, waveform: np.ndarray, confidence: float) -> List[Dict[str, Any]]:
-        # Feed one voiced frame then a silent tail to reuse the same VAD/segment logic.
+    def _process_phrase_offline(self, waveform: np.ndarray, level_db: float) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
-        events.extend(self.segmenter.process_frame(waveform, confidence, now_seconds=0.0))
+        events.extend(self.segmenter.process_frame(waveform, level_db, now_seconds=0.0))
         silent_tail = np.zeros(self.config.release_samples(), dtype=np.float32)
-        events.extend(self.segmenter.process_frame(silent_tail, 0.0, now_seconds=float(waveform.size / self.config.sample_rate)))
+        events.extend(
+            self.segmenter.process_frame(
+                silent_tail,
+                self.config.meter_floor_db,
+                now_seconds=float(waveform.size / self.config.sample_rate),
+            )
+        )
         return self._expand_events(events)
 
     def _expand_events(self, events: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -268,6 +372,14 @@ class SegmentedPhraseWorker:
             elif event["type"] == "phrase_ended":
                 out.append(self._state_event("processing"))
             if event["type"] == "segments_created" and isinstance(phrase, SegmentedPhrase):
+                out.append(
+                    {
+                        "type": "phrase_summary",
+                        "phrase_id": phrase.phrase_id,
+                        "duration_seconds": phrase.waveform.size / self.config.sample_rate,
+                        "num_segments": len(phrase.segments),
+                    }
+                )
                 retrieval = self._retrieve_phrase(phrase)
                 out.append(retrieval.to_event())
                 out.append(self._state_event("playing_sequence" if retrieval.matches else "listening"))
@@ -280,6 +392,11 @@ class SegmentedPhraseWorker:
         return self.retrieval.query_segments(phrase.phrase_id, phrase.segments)
 
     def _schedule_sequence(self, event: Dict[str, Any]) -> None:
+        if self.armed:
+            self._resume_after_playback = True
+            self._active_playback_phrase_id = int(event["phrase_id"])
+            self._active_playback_last_index = max(0, int(event["num_segments"]) - 1)
+            self._stop_mic()
         self._player.play_sequence(event["phrase_id"], event["matches"])
 
     def _emit_segment_started(self, phrase_id: int, match: Dict[str, Any]) -> None:
@@ -301,6 +418,17 @@ class SegmentedPhraseWorker:
                 "metadata": match["metadata"],
             }
         )
+        if (
+            self._resume_after_playback
+            and self.armed
+            and self._active_playback_phrase_id == phrase_id
+            and self._active_playback_last_index == match["segment_index"]
+        ):
+            self._resume_after_playback = False
+            self._active_playback_phrase_id = None
+            self._active_playback_last_index = None
+            self._start_mic()
+            self.emit(self._state_event("listening"))
 
     def _state_event(self, state: str) -> Dict[str, Any]:
         self._last_state = state
@@ -309,9 +437,15 @@ class SegmentedPhraseWorker:
             "state": state,
             "armed": self.armed,
             "calibrated": self.calibrated,
-            "calibrating": self._calibrating,
+            "setup_mode": self.setup_mode,
+            "setup_stage": self._setup_stage,
             "config": asdict(self.config),
             "model_path": self.model_path,
+            "noise_floor_db": self.noise_floor_db,
+            "singing_soft_db": self.singing_soft_db,
+            "singing_median_db": self.singing_median_db,
+            "gate_open_db": self._candidate_gate_open_db if self._candidate_gate_open_db is not None else self.config.gate_open_db,
+            "gate_close_db": self._candidate_gate_close_db if self._candidate_gate_close_db is not None else self.config.gate_close_db,
         }
         if self.corpus is not None:
             event["corpus_backend"] = self.corpus.backend

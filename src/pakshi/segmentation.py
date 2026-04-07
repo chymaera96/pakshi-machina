@@ -83,7 +83,7 @@ class PhraseSegmenter:
     def process_frame(
         self,
         frame: Sequence[float] | np.ndarray,
-        confidence: float,
+        level_db: float,
         *,
         now_seconds: Optional[float] = None,
     ) -> List[Dict[str, object]]:
@@ -100,7 +100,7 @@ class PhraseSegmenter:
         events: List[Dict[str, object]] = []
 
         if not self._active:
-            if confidence >= self.config.onset_threshold:
+            if level_db >= self.config.gate_open_db:
                 self._pending_voiced_samples += wav.size
             else:
                 self._pending_voiced_samples = 0
@@ -117,12 +117,14 @@ class PhraseSegmenter:
                 pre_roll = np.asarray(self._pre_roll, dtype=np.float32)
                 if pre_roll.size:
                     self._phrase_chunks.append(pre_roll.copy())
+                else:
+                    self._phrase_chunks.append(wav.copy())
                 self._pending_voiced_samples = 0
 
         else:
             self._phrase_chunks.append(wav)
 
-            if confidence < self.config.sustain_threshold:
+            if level_db < self.config.gate_close_db:
                 self._release_samples += wav.size
             else:
                 self._release_samples = 0

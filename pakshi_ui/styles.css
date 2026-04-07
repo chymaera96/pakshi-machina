@@ -78,11 +78,23 @@ body {
   margin: 0 0 28px;
 }
 
+body[data-mode="setup"] .performance-controls {
+  display: none;
+}
+
+body[data-mode="performance"] .setup-controls {
+  display: none;
+}
+
 .controls label {
   display: grid;
   gap: 8px;
   color: var(--muted);
   min-width: 320px;
+}
+
+.setup-controls button:not(.mic-button) {
+  min-width: 150px;
 }
 
 button,
@@ -258,6 +270,7 @@ input {
 }
 
 .level-bar {
+  position: relative;
   height: 14px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.07);
@@ -271,6 +284,24 @@ input {
   border-radius: inherit;
   background: linear-gradient(90deg, #6fe2b3, #ffd76a, #ff7f7f);
   transition: width 90ms linear;
+}
+
+.threshold-marker {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  transform: translateX(-1px);
+}
+
+.close-marker {
+  background: rgba(129, 169, 255, 0.9);
+}
+
+.open-marker {
+  background: rgba(255, 215, 106, 0.95);
 }
 
 .cue-panel[data-state="idle"] .cue-core {
@@ -294,9 +325,15 @@ input {
 }
 
 .cue-panel[data-state="processing"] .cue-core,
-.cue-panel[data-state="playing_sequence"] .cue-core {
+.cue-panel[data-state="playing_sequence"] .cue-core,
+.cue-panel[data-state="setup_test"] .cue-core {
   background: radial-gradient(circle at 30% 30%, #fff9ed, #ffd76a 44%, #564100 100%);
   box-shadow: 0 0 28px rgba(255, 215, 106, 0.4);
+}
+
+.cue-panel[data-state="setup"] .cue-core {
+  background: radial-gradient(circle at 30% 30%, #f4f7ff, #81a9ff 44%, #21365e 100%);
+  box-shadow: 0 0 28px rgba(129, 169, 255, 0.35);
 }
 
 .pill {

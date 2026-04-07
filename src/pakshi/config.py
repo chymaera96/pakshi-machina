@@ -9,16 +9,20 @@ class RuntimeConfig:
     input_frame_seconds: float = 0.1
     segment_seconds: float = 0.5
     pre_roll_seconds: float = 0.15
-    onset_threshold: float = 0.62
-    sustain_threshold: float = 0.45
+    gate_open_db: float = -42.0
+    gate_close_db: float = -48.0
     onset_hold_seconds: float = 0.05
-    release_seconds: float = 0.6
+    release_seconds: float = 0.55
     min_phrase_seconds: float = 0.25
     max_phrase_seconds: float = 12.0
     cooldown_seconds: float = 0.15
-    confidence_smoothing: float = 0.8
+    envelope_smoothing: float = 0.72
     stitch_gap_seconds: float = 0.15
     output_gain: float = 1.0
+    meter_floor_db: float = -90.0
+    calibration_noise_seconds: float = 2.5
+    calibration_singing_seconds: float = 8.0
+    calibration_min_separation_db: float = 8.0
 
     def segment_samples(self) -> int:
         return int(round(self.segment_seconds * self.sample_rate))

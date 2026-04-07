@@ -6,43 +6,57 @@
     <title>Pakshi Machina</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body data-mode="setup">
     <main class="app-shell">
       <section class="hero">
         <p class="eyebrow">Pakshi Machina</p>
         <h1>Segmented Phrase Retrieval</h1>
         <p class="summary">
-          VAD-defined singing phrases are sliced into 0.5 second segments. Each segment retrieves one nearest sound.
+          Noise-gated singing phrases are sliced into 0.5 second segments. Each segment retrieves one nearest sound.
         </p>
       </section>
 
-      <section class="cue-panel" id="cue-panel" data-state="idle">
+      <section class="cue-panel" id="cue-panel" data-state="setup">
         <div class="cue-orb">
           <span class="cue-pulse"></span>
           <span class="cue-core"></span>
         </div>
         <div class="cue-copy">
-          <p class="cue-label" id="cue-label">Idle</p>
-          <p class="cue-text" id="cue-text">Tap the mic to calibrate first, then tap it again to listen.</p>
+          <p class="cue-label" id="cue-label">Setup</p>
+          <p class="cue-text" id="cue-text">Capture room noise, then capture realistic singing. Setup will finish automatically.</p>
         </div>
         <div class="level-wrap">
-          <div class="level-bar">
+          <div class="level-bar threshold-bar">
             <span id="level-fill"></span>
+            <i id="close-marker" class="threshold-marker close-marker"></i>
+            <i id="open-marker" class="threshold-marker open-marker"></i>
           </div>
-          <p class="microcopy" id="monitor-readout">mic 0.00 | confidence 0.00</p>
+          <p class="microcopy" id="monitor-readout">level -inf dB | gate below</p>
         </div>
       </section>
 
-      <section class="controls">
+      <section class="controls setup-controls" id="setup-controls">
+        <button id="setup-enter" class="secondary">Setup Mode</button>
+        <button id="capture-noise">Capture Noise Floor</button>
+        <button id="capture-singing">Capture Singing Level</button>
+        <button id="reset-setup" class="secondary">Reset</button>
+        <label>
+          Bundle directory
+          <input id="bundle-dir" type="text" value="./pakshi_bundle" />
+        </label>
+      </section>
+
+      <section class="controls performance-controls" id="performance-controls">
         <button id="arm-worker" class="mic-button" aria-label="Microphone toggle" title="Microphone toggle">
           <span class="record-icon" aria-hidden="true">
             <span class="record-ring"></span>
             <span class="record-dot"></span>
           </span>
         </button>
+        <button id="reopen-setup" class="secondary">Setup</button>
         <label>
           Bundle directory
-          <input id="bundle-dir" type="text" value="./pakshi_bundle" />
+          <input id="bundle-dir-performance" type="text" value="./pakshi_bundle" />
         </label>
       </section>
 
@@ -54,22 +68,20 @@
           <pre id="state-json"></pre>
         </article>
         <article class="panel">
-          <h2>Segments</h2>
-          <ol id="segments-list"></ol>
+          <h2>Setup</h2>
+          <ol id="setup-list"></ol>
+          <p class="microcopy" id="setup-summary">noise -- | soft -- | open -- | close --</p>
         </article>
         <article class="panel">
           <h2>Playback</h2>
           <ol id="playback-list"></ol>
         </article>
         <article class="panel span-2">
-          <h2>Notes</h2>
-          <p class="microcopy">
-            Tap the mic once to run calibration, then tap it again to listen. Tap the lit mic at any time to stop,
-            clear playback, and reset the live state.
-          </p>
+          <h2>Segments</h2>
+          <ol id="segments-list"></ol>
         </article>
       </section>
     </main>
     <script src="./renderer.js"></script>
   </body>
-  </html>
+</html>

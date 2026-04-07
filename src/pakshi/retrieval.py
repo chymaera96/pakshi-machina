@@ -53,6 +53,7 @@ class OnnxEmbeddingModel:
         arr = np.asarray(waveforms, dtype=np.float32)
         if arr.ndim != 2:
             raise ValueError(f"Expected waveform batch of shape [B, T], got {arr.shape}")
+        batch_size = arr.shape[0]
         out = self.session.run([self.output_name], {self.input_name: arr})[0]
         out = np.asarray(out, dtype=np.float32)
         if out.ndim == 2:
@@ -62,10 +63,14 @@ class OnnxEmbeddingModel:
             # - [1, B, D]: singleton leading axis, segment axis in the middle
             # - [B, 1, D]: singleton middle axis
             # - [B, T', D]: short time axis that should be pooled per query
-            if out.shape[0] == 1:
+            if out.shape[0] == 1 and out.shape[1] == batch_size:
                 return out[0]
-            if out.shape[1] == 1:
+            if out.shape[1] == 1 and out.shape[0] == batch_size:
                 return out[:, 0, :]
+            if out.shape[0] == batch_size:
+                return out.mean(axis=1)
+            if out.shape[1] == batch_size and out.shape[0] == 1:
+                return out[0]
             return out.mean(axis=1)
         raise ValueError(f"Expected 2D or 3D embedding output, got shape {out.shape}")
 

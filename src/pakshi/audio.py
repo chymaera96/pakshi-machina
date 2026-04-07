@@ -15,51 +15,27 @@ try:
 except Exception:  # pragma: no cover
     sd = None
 
-try:
-    import torch
-    import torchcrepe  # type: ignore
-except Exception:  # pragma: no cover
-    torch = None
-    torchcrepe = None
+
+def rms_dbfs(waveform: Sequence[float] | np.ndarray, *, floor_db: float = -90.0) -> float:
+    wav = np.asarray(waveform, dtype=np.float32).reshape(-1)
+    if wav.size == 0:
+        return floor_db
+    rms = float(np.sqrt(np.mean(np.square(wav))))
+    if rms <= 1e-9:
+        return floor_db
+    return float(max(20.0 * np.log10(rms), floor_db))
 
 
-class CrepeConfidenceEstimator:
-    def __init__(self, sample_rate: int, hop_length: int = 160):
-        self.sample_rate = sample_rate
-        self.hop_length = hop_length
+class LevelEstimator:
+    def __init__(self, floor_db: float = -90.0):
+        self.floor_db = floor_db
 
-    def estimate(self, waveform: Sequence[float] | np.ndarray) -> float:
-        if torchcrepe is None or torch is None:  # pragma: no cover
-            raise RuntimeError("torchcrepe is not installed. Add torchcrepe to run CREPE-based phrase gating.")
-        wav = np.asarray(waveform, dtype=np.float32).reshape(1, -1)
-        tensor = torch.from_numpy(wav)
-        _, periodicity = torchcrepe.predict(
-            tensor,
-            self.sample_rate,
-            self.hop_length,
-            fmin=50.0,
-            fmax=1000.0,
-            model="full",
-            batch_size=1,
-            return_periodicity=True,
-            device="cpu",
-        )
-        return float(torch.mean(periodicity).item())
+    def estimate_db(self, waveform: Sequence[float] | np.ndarray) -> float:
+        return rms_dbfs(waveform, floor_db=self.floor_db)
 
 
-class EnergyConfidenceEstimator:
-    def estimate(self, waveform: Sequence[float] | np.ndarray) -> float:
-        wav = np.asarray(waveform, dtype=np.float32).reshape(-1)
-        if wav.size == 0:
-            return 0.0
-        rms = float(np.sqrt(np.mean(np.square(wav))))
-        return float(np.clip(rms * 12.0, 0.0, 1.0))
-
-
-def build_confidence_estimator(sample_rate: int):
-    if torchcrepe is not None and torch is not None:
-        return CrepeConfidenceEstimator(sample_rate=sample_rate)
-    return EnergyConfidenceEstimator()
+def build_level_estimator() -> LevelEstimator:
+    return LevelEstimator()
 
 
 class LiveInputStream:
@@ -154,7 +130,12 @@ class PlaybackHandle:
 
 
 class NoopSequencePlayer:
-    def __init__(self, on_started: Callable[[int, dict], None], on_finished: Callable[[int, dict], None], stitch_gap_seconds: float = 0.25):
+    def __init__(
+        self,
+        on_started: Callable[[int, dict], None],
+        on_finished: Callable[[int, dict], None],
+        stitch_gap_seconds: float = 0.15,
+    ):
         self.on_started = on_started
         self.on_finished = on_finished
         self.stitch_gap_seconds = stitch_gap_seconds
@@ -193,7 +174,14 @@ class NoopSequencePlayer:
 
 
 class SoundDeviceSequencePlayer(NoopSequencePlayer):
-    def __init__(self, sample_rate: int, output_gain: float, on_started: Callable[[int, dict], None], on_finished: Callable[[int, dict], None], stitch_gap_seconds: float = 0.25):
+    def __init__(
+        self,
+        sample_rate: int,
+        output_gain: float,
+        on_started: Callable[[int, dict], None],
+        on_finished: Callable[[int, dict], None],
+        stitch_gap_seconds: float = 0.15,
+    ):
         if sd is None:  # pragma: no cover
             raise RuntimeError("sounddevice is not installed. Add sounddevice to enable audio playback.")
         super().__init__(on_started=on_started, on_finished=on_finished, stitch_gap_seconds=stitch_gap_seconds)
