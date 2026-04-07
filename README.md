@@ -2,10 +2,10 @@
 
 Realtime segmented phrase retrieval for a voice-and-sound performance system.
 
-## Overview
+## Overview (v0.1)
 - Capture a sung phrase using a CREPE-confidence VAD proxy.
 - Split the completed phrase into fixed `0.5 s` non-overlapping segments.
-- Embed each segment with an ONNX model exported from `SFXSearch/export_onnx.py`.
+- Embed each segment with an ONNX model.
 - L2-normalize each embedding and retrieve the top-1 match from a static FAISS corpus.
 - Play the resulting sequence of retrieved sounds in segment order.
 
@@ -43,11 +43,8 @@ Notes:
 The project uses the ML4BL zebra finch dataset from Zenodo:
 - https://zenodo.org/records/5545872
 
-Download and unpack the dataset into `data/ML4BL_ZF/wavs`:
+To download and unpack the dataset into `data/ML4BL_ZF/wavs`:
 
-```bash
-python setup_ml4bl.py
-```
 
 ```bash
 python setup_ml4bl.py --write-manifest
@@ -56,18 +53,18 @@ python setup_ml4bl.py --write-manifest
 ## Build A Corpus Bundle
 ```bash
 python build_pakshi_corpus.py \
-  --model /path/to/model.onnx \
+  --model model_tc11.onnx \
   --manifest data/ml4bl_wavs.jsonl \
   --out_dir pakshi_bundle
 ```
 
 The bundle contains `metadata.jsonl` plus `index.faiss` and/or `embeddings.npy`.
 
-## Run The Worker
+## Run The Worker (for debugging)
 
 ```bash
 python pakshi_worker.py \
-  --model /path/to/the_repo_root_onnx_file.onnx \
+  --model model_tc11.onnx \
   --bundle pakshi_bundle \
   --arm
 ```
@@ -82,22 +79,9 @@ Install the Electron app:
 ```bash
 cd pakshi_ui
 npm install
-cd ..
-
-cd pakshi_ui
 npm start
 ```
 
-Notes:
-- If you launch Electron from an active Conda shell, the app will use that Conda Python automatically.
-- You can still override the interpreter manually with `export PAKSHI_PYTHON_PATH="$(which python)"`.
-- By default, the app uses the only `*.onnx` file in the repo root and [pakshi_bundle](/Users/abhattacharjee/pakshi-machina/pakshi_bundle).
-- Set `PAKSHI_MODEL_PATH` or `PAKSHI_BUNDLE_PATH` only if you want to override those defaults.
-- `pakshi_worker.py` is started by Electron automatically; manual startup is only for debugging the backend by itself.
-- Do not set `PAKSHI_ARM_ON_BOOT` with the current calibration-first flow.
-- `Arm Mic` opens the microphone and starts live listening.
-- `Clear Queue / Restart` stops current playback, clears the phrase buffer, and returns the system to listening mode.
-- The app sets `KMP_DUPLICATE_LIB_OK=TRUE` for the worker process to avoid macOS OpenMP runtime conflicts seen with the audio/ML stack.
 
 ## Validation
 ```bash
