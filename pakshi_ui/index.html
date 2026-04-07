@@ -12,19 +12,37 @@
         <p class="eyebrow">Pakshi Machina</p>
         <h1>Segmented Phrase Retrieval</h1>
         <p class="summary">
-          VAD-defined singing phrases are sliced into 2 second segments. Each segment retrieves one nearest sound.
+          VAD-defined singing phrases are sliced into 0.5 second segments. Each segment retrieves one nearest sound.
         </p>
       </section>
 
+      <section class="cue-panel" id="cue-panel" data-state="idle">
+        <div class="cue-orb">
+          <span class="cue-pulse"></span>
+          <span class="cue-core"></span>
+        </div>
+        <div class="cue-copy">
+          <p class="cue-label" id="cue-label">Idle</p>
+          <p class="cue-text" id="cue-text">Tap the mic to calibrate first, then tap it again to listen.</p>
+        </div>
+        <div class="level-wrap">
+          <div class="level-bar">
+            <span id="level-fill"></span>
+          </div>
+          <p class="microcopy" id="monitor-readout">mic 0.00 | confidence 0.00</p>
+        </div>
+      </section>
+
       <section class="controls">
-        <button id="load-corpus">Load Demo Corpus</button>
-        <button id="arm-worker">Arm</button>
-        <button id="disarm-worker">Disarm</button>
-        <button id="stop-all">Stop</button>
-        <button id="refresh-state">Refresh State</button>
+        <button id="arm-worker" class="mic-button" aria-label="Microphone toggle" title="Microphone toggle">
+          <span class="record-icon" aria-hidden="true">
+            <span class="record-ring"></span>
+            <span class="record-dot"></span>
+          </span>
+        </button>
         <label>
           Bundle directory
-          <input id="bundle-dir" type="text" value="./pakshi_demo_bundle" />
+          <input id="bundle-dir" type="text" value="./pakshi_bundle" />
         </label>
       </section>
 
@@ -46,10 +64,8 @@
         <article class="panel span-2">
           <h2>Notes</h2>
           <p class="microcopy">
-            Set <code>PAKSHI_MODEL_PATH</code> before launching Electron, or place a model at
-            <code>models/model.onnx</code>. Optional startup env vars:
-            <code>PAKSHI_BUNDLE_PATH</code>, <code>PAKSHI_PYTHON_PATH</code>,
-            <code>PAKSHI_ARM_ON_BOOT=1</code>.
+            Tap the mic once to run calibration, then tap it again to listen. Tap the lit mic at any time to stop,
+            clear playback, and reset the live state.
           </p>
         </article>
       </section>

@@ -67,7 +67,7 @@ def split_into_segments(
 class PhraseSegmenter:
     def __init__(self, config: RuntimeConfig):
         self.config = config
-        self._pre_roll: Deque[float] = deque(maxlen=max(1, self.config.pre_roll_samples()))
+        self._pre_roll: Deque[float] = deque(maxlen=max(0, self.config.pre_roll_samples()))
         self._phrase_chunks: List[np.ndarray] = []
         self._active_phrase_id = 0
         self._started_at_seconds: Optional[float] = None

@@ -9,6 +9,6 @@
     "start:trace": "ELECTRON_ENABLE_LOGGING=1 electron ."
   },
   "dependencies": {
-    "electron": "^37.2.0"
+    "electron": "^41.1.1"
   }
 }

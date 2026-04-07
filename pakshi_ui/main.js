@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
+const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 const readline = require("readline");
@@ -6,6 +7,48 @@ const readline = require("readline");
 let mainWindow = null;
 let worker = null;
 let workerPaths = null;
+let workerStderrTail = "";
+
+function emitWorkerEvent(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (!mainWindow.webContents || mainWindow.webContents.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("worker-event", payload);
+}
+
+function resolvePython(repoRoot) {
+  if (process.env.PAKSHI_PYTHON_PATH) {
+    return process.env.PAKSHI_PYTHON_PATH;
+  }
+  if (process.env.CONDA_PREFIX) {
+    return path.join(process.env.CONDA_PREFIX, "bin", "python");
+  }
+  return "python3";
+}
+
+function resolveModel(repoRoot) {
+  if (process.env.PAKSHI_MODEL_PATH) {
+    if (fs.existsSync(process.env.PAKSHI_MODEL_PATH)) {
+      return process.env.PAKSHI_MODEL_PATH;
+    }
+  }
+  const onnxFiles = fs
+    .readdirSync(repoRoot)
+    .filter((name) => name.toLowerCase().endsWith(".onnx"))
+    .sort();
+  if (onnxFiles.length === 1) {
+    return path.join(repoRoot, onnxFiles[0]);
+  }
+  if (onnxFiles.length > 1) {
+    throw new Error(
+      `Multiple ONNX files found in repo root: ${onnxFiles.join(", ")}. Set PAKSHI_MODEL_PATH explicitly.`
+    );
+  }
+  throw new Error("No ONNX file found in repo root. Add one or set PAKSHI_MODEL_PATH explicitly.");
+}
 
 function sendToWorker(payload) {
   if (!worker || worker.killed) {
@@ -28,61 +71,62 @@ function createWindow() {
 
 function startWorker() {
   const repoRoot = path.resolve(__dirname, "..");
-  const python = process.env.PAKSHI_PYTHON_PATH || path.join(repoRoot, ".venv", "bin", "python");
-  const model = process.env.PAKSHI_MODEL_PATH || path.join(repoRoot, "models", "model.onnx");
+  const python = resolvePython(repoRoot);
+  const model = resolveModel(repoRoot);
   const bundle = process.env.PAKSHI_BUNDLE_PATH || path.join(repoRoot, "pakshi_bundle");
   const args = [path.join(repoRoot, "pakshi_worker.py"), "--model", model];
-  if (process.env.PAKSHI_BUNDLE_PATH) {
-    args.push("--bundle", bundle);
-  }
-  if (process.env.PAKSHI_ARM_ON_BOOT === "1") {
-    args.push("--arm");
-  }
+  args.push("--bundle", bundle);
   workerPaths = { python, model, bundle };
+  workerStderrTail = "";
 
   worker = spawn(python, args, {
     cwd: repoRoot,
+    env: {
+      ...process.env,
+      KMP_DUPLICATE_LIB_OK: process.env.KMP_DUPLICATE_LIB_OK || "TRUE",
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
 
   worker.on("spawn", () => {
-    if (mainWindow) {
-      mainWindow.webContents.send("worker-event", {
-        type: "ui_boot",
-        ...workerPaths,
-      });
-    }
+    emitWorkerEvent({
+      type: "ui_boot",
+      ...workerPaths,
+    });
+  });
+
+  worker.on("error", (error) => {
+    emitWorkerEvent({
+      type: "error",
+      message: `worker failed to start: ${String(error.message || error)}`,
+    });
   });
 
   const rl = readline.createInterface({ input: worker.stdout });
   rl.on("line", (line) => {
-    if (!mainWindow) {
-      return;
-    }
     try {
-      mainWindow.webContents.send("worker-event", JSON.parse(line));
+      emitWorkerEvent(JSON.parse(line));
     } catch (error) {
-      mainWindow.webContents.send("worker-event", { type: "error", message: String(error) });
+      emitWorkerEvent({ type: "error", message: String(error) });
     }
   });
 
   worker.stderr.on("data", (chunk) => {
-    if (mainWindow) {
-      mainWindow.webContents.send("worker-event", {
-        type: "error",
-        message: chunk.toString(),
-      });
-    }
+    const text = chunk.toString();
+    workerStderrTail = `${workerStderrTail}${text}`.slice(-4000);
+    emitWorkerEvent({
+      type: "error",
+      message: text,
+    });
   });
 
   worker.on("exit", (code, signal) => {
-    if (mainWindow) {
-      mainWindow.webContents.send("worker-event", {
-        type: "worker_exit",
-        code,
-        signal,
-      });
-    }
+    emitWorkerEvent({
+      type: "worker_exit",
+      code,
+      signal,
+      stderrTail: workerStderrTail || null,
+    });
   });
 }
 
