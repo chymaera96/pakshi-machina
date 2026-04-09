@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-import librosa
 import numpy as np
+import soundfile as sf
 
 from src.pakshi.config import RuntimeConfig
 from src.pakshi.corpus import write_metadata_jsonl
@@ -44,13 +44,15 @@ def main() -> None:
     embeddings: List[np.ndarray] = []
     for row in manifest:
         path = Path(row["path"])
-        audio, _ = librosa.load(path, sr=args.sample_rate, mono=True)
-        emb = embedder.embed_batch(np.expand_dims(audio.astype(np.float32), axis=0))
+        audio, sr = sf.read(path, dtype="float32")
+        if audio.ndim == 2:
+            audio = audio.mean(axis=1)
+        emb = embedder.embed_batch(np.expand_dims(audio.astype(np.float32), axis=0), sample_rate=sr)
         emb = normalize_rows(emb)[0]
         embeddings.append(emb)
         out_row = dict(row)
         out_row["path"] = str(path)
-        out_row.setdefault("duration_seconds", float(audio.size / args.sample_rate))
+        out_row.setdefault("duration_seconds", float(audio.size / sr))
         rows.append(out_row)
 
     emb_arr = np.stack(embeddings, axis=0).astype(np.float32)

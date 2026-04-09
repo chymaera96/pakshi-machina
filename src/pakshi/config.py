@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class RuntimeConfig:
     sample_rate: int = 32000
     input_frame_seconds: float = 0.1
-    segment_seconds: float = 0.5
+    segment_seconds: float = 1.0
     pre_roll_seconds: float = 0.15
     gate_open_db: float = -42.0
     gate_close_db: float = -48.0

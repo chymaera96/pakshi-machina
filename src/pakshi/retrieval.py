@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
+import librosa
 import numpy as np
 
+from .config import RuntimeConfig
 from .segmentation import Segment
 
 try:
@@ -20,6 +22,10 @@ except Exception:  # pragma: no cover
     ort = None
 
 
+EFFICIENTAT_TARGET_SR = 32000
+EFFICIENTAT_TARGET_SAMPLES = 32000
+
+
 def normalize_rows(vectors: np.ndarray) -> np.ndarray:
     arr = np.asarray(vectors, dtype=np.float32)
     if arr.ndim != 2:
@@ -29,8 +35,31 @@ def normalize_rows(vectors: np.ndarray) -> np.ndarray:
     return arr / norms
 
 
+def preprocess_efficientat_waveform(
+    waveform: np.ndarray,
+    sample_rate: int,
+    *,
+    target_sr: int = EFFICIENTAT_TARGET_SR,
+    target_samples: int = EFFICIENTAT_TARGET_SAMPLES,
+) -> np.ndarray:
+    wav = np.asarray(waveform, dtype=np.float32)
+    if wav.ndim == 2:
+        wav = wav.mean(axis=1)
+    wav = wav.reshape(-1)
+    if sample_rate != target_sr:
+        wav = librosa.resample(wav, orig_sr=sample_rate, target_sr=target_sr)
+    if wav.size == 0:
+        return np.zeros(target_samples, dtype=np.float32)
+    if wav.size < target_samples:
+        reps = target_samples // wav.size + 1
+        wav = np.tile(wav, reps)[:target_samples]
+    else:
+        wav = wav[:target_samples]
+    return wav.astype(np.float32, copy=False)
+
+
 class EmbeddingModel(Protocol):
-    def embed_batch(self, waveforms: np.ndarray) -> np.ndarray:
+    def embed_batch(self, waveforms: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
         ...
 
 
@@ -48,31 +77,36 @@ class OnnxEmbeddingModel:
         self.session = ort.InferenceSession(self.model_path, providers=self.providers)
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
+        self.model_style = "efficientat_fixed_1s"
+        if self.input_name != "audio":
+            raise RuntimeError(f"Expected EfficientAT input tensor named 'audio', got '{self.input_name}'.")
 
-    def embed_batch(self, waveforms: np.ndarray) -> np.ndarray:
+    def embed_batch(self, waveforms: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
         arr = np.asarray(waveforms, dtype=np.float32)
         if arr.ndim != 2:
             raise ValueError(f"Expected waveform batch of shape [B, T], got {arr.shape}")
-        batch_size = arr.shape[0]
-        out = self.session.run([self.output_name], {self.input_name: arr})[0]
+        source_sr = int(sample_rate or RuntimeConfig.sample_rate)
+        batch = np.stack(
+            [preprocess_efficientat_waveform(waveform, source_sr) for waveform in arr],
+            axis=0,
+        ).astype(np.float32)
+        outputs = [self._embed_single(waveform) for waveform in batch]
+        return np.stack(outputs, axis=0).astype(np.float32)
+
+    def _embed_single(self, waveform: np.ndarray) -> np.ndarray:
+        out = self.session.run([self.output_name], {self.input_name: waveform.reshape(1, -1)})[0]
         out = np.asarray(out, dtype=np.float32)
         if out.ndim == 2:
-            return out
+            return out[0]
         if out.ndim == 3:
-            # Handle exporter/runtime variants:
-            # - [1, B, D]: singleton leading axis, segment axis in the middle
-            # - [B, 1, D]: singleton middle axis
-            # - [B, T', D]: short time axis that should be pooled per query
-            if out.shape[0] == 1 and out.shape[1] == batch_size:
-                return out[0]
-            if out.shape[1] == 1 and out.shape[0] == batch_size:
-                return out[:, 0, :]
-            if out.shape[0] == batch_size:
-                return out.mean(axis=1)
-            if out.shape[1] == batch_size and out.shape[0] == 1:
-                return out[0]
-            return out.mean(axis=1)
-        raise ValueError(f"Expected 2D or 3D embedding output, got shape {out.shape}")
+            if out.shape[0] == 1 and out.shape[1] == 1:
+                return out[0, 0]
+            if out.shape[0] == 1:
+                return out[0].mean(axis=0)
+            if out.shape[1] == 1:
+                return out[:, 0, :].mean(axis=0)
+            return out.mean(axis=(0, 1))
+        raise ValueError(f"Expected 2D or 3D EfficientAT embedding output, got shape {out.shape}")
 
 
 class FaissFlatL2Index:
@@ -159,16 +193,24 @@ class RetrievalSequence:
 
 
 class RetrievalEngine:
-    def __init__(self, embedder: EmbeddingModel, index: SearchIndex, metadata: Sequence[Dict[str, Any]]):
+    def __init__(
+        self,
+        embedder: EmbeddingModel,
+        index: SearchIndex,
+        metadata: Sequence[Dict[str, Any]],
+        *,
+        sample_rate: int = RuntimeConfig.sample_rate,
+    ):
         self.embedder = embedder
         self.index = index
         self.metadata = list(metadata)
+        self.sample_rate = sample_rate
 
     def query_segments(self, phrase_id: int, segments: Sequence[Segment]) -> RetrievalSequence:
         if not segments:
             return RetrievalSequence(phrase_id=phrase_id, matches=[])
         batch = np.stack([seg.waveform for seg in segments], axis=0).astype(np.float32)
-        emb = normalize_rows(self.embedder.embed_batch(batch))
+        emb = normalize_rows(self.embedder.embed_batch(batch, sample_rate=self.sample_rate))
         distances, indices = self.index.search(emb, k=1)
 
         matches: List[SegmentMatch] = []

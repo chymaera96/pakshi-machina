@@ -437,6 +437,7 @@ class SegmentedPhraseWorker:
             "state": state,
             "armed": self.armed,
             "calibrated": self.calibrated,
+            "model_style": self.embedder.model_style,
             "setup_mode": self.setup_mode,
             "setup_stage": self._setup_stage,
             "config": asdict(self.config),

@@ -4,7 +4,7 @@ Realtime segmented phrase retrieval for a voice-and-sound performance system.
 
 ## Overview (v0.2)
 - Capture a sung phrase using a noise-gate envelope VAD tuned through an operator-assisted setup stage.
-- Split the completed phrase into fixed `0.5 s` non-overlapping segments.
+- Split the completed phrase into fixed `1.0 s` non-overlapping segments.
 - Embed each segment with an ONNX model.
 - L2-normalize each embedding and retrieve the top-1 match from a static FAISS corpus.
 - Play the resulting sequence of retrieved sounds in segment order.
@@ -59,6 +59,7 @@ python build_pakshi_corpus.py \
 ```
 
 The bundle contains `metadata.jsonl` plus `index.faiss` and/or `embeddings.npy`.
+This branch assumes the model is the EfficientAT `audio -> embedding` ONNX and uses fixed 1-second preprocessing before inference.
 
 ## Run The Worker (for debugging)
 
@@ -68,7 +69,7 @@ python pakshi_worker.py \
   --bundle pakshi_bundle
 ```
 
-The worker is the long-running backend. During setup it captures room noise and realistic singing level, then derives gate thresholds automatically. When armed, it opens the microphone, monitors live amplitude in dBFS, segments phrases with a noise gate, runs retrieval, and schedules playback.
+The worker is the long-running backend. During setup it captures room noise and realistic singing level, then derives gate thresholds automatically. When armed, it opens the microphone, monitors live amplitude in dBFS, segments phrases into 1-second windows, runs EfficientAT embedding inference, and schedules playback.
 
 You do not need to start `pakshi_worker.py` manually when using the Electron app. The app launches it automatically on startup.
 
