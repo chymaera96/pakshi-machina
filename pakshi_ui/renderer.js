@@ -14,6 +14,14 @@ const levelFill = document.getElementById("level-fill");
 const monitorReadout = document.getElementById("monitor-readout");
 const openMarker = document.getElementById("open-marker");
 const closeMarker = document.getElementById("close-marker");
+const onsetMethodSelect = document.getElementById("onset-method");
+const onsetHopSizeSelect = document.getElementById("onset-hop-size");
+const onsetMinIntervalInput = document.getElementById("onset-min-interval");
+const onsetMinIntervalValue = document.getElementById("onset-min-interval-value");
+const onsetThresholdInput = document.getElementById("onset-threshold");
+const onsetThresholdValue = document.getElementById("onset-threshold-value");
+const onsetSilenceDbInput = document.getElementById("onset-silence-db");
+const onsetSilenceDbValue = document.getElementById("onset-silence-db-value");
 
 let lastErrorMessage = null;
 let isCalibrated = false;
@@ -22,14 +30,15 @@ let setupMode = true;
 let gateOpenDb = -42;
 let gateCloseDb = -48;
 const meterFloorDb = -90;
+let onsetControlsReady = false;
 
 const STATE_COPY = {
   idle: ["Idle", "Enter setup or arm the mic for performance."],
   setup: ["Setup", "Capture room noise, then capture realistic singing."],
   listening: ["Listening", "Microphone hot. Waiting for a sung phrase."],
   in_phrase: ["Recording Phrase", "Phrase detected. Capturing live audio."],
-  processing: ["Retrieving", "Embedding segments and finding nearest neighbours."],
-  playing_sequence: ["Playing Response", "Retrieved sequence is being played back."],
+  processing: ["Retrieving", "Embedding onset-driven segments with CREPE pitch latents and finding nearest neighbours."],
+  playing_sequence: ["Playing Response", "Retrieved bird sounds are following the singer's onset rhythm."],
 };
 
 const ACTIVE_STATES = new Set(["listening", "in_phrase", "processing", "playing_sequence"]);
@@ -77,6 +86,50 @@ function updateMarkers() {
   const normalize = (db) => `${Math.max(0, Math.min(100, ((db - meterFloorDb) / (0 - meterFloorDb)) * 100))}%`;
   openMarker.style.left = normalize(gateOpenDb);
   closeMarker.style.left = normalize(gateCloseDb);
+}
+
+function updateOnsetReadout(value) {
+  onsetMinIntervalValue.textContent = `${Math.round(Number(value) * 1000)} ms`;
+}
+
+function updateOnsetThresholdReadout(value) {
+  onsetThresholdValue.textContent = Number(value).toFixed(2);
+}
+
+function updateOnsetSilenceReadout(value) {
+  onsetSilenceDbValue.textContent = `${Math.round(Number(value))} dB`;
+}
+
+function syncOnsetControls(config) {
+  if (!config) {
+    return;
+  }
+  onsetControlsReady = false;
+  onsetMethodSelect.value = config.onset_method || "specflux";
+  onsetHopSizeSelect.value = String(config.onset_hop_size || 256);
+  onsetMinIntervalInput.value = String(config.onset_min_interval_seconds || 0.1);
+  onsetThresholdInput.value = String(config.onset_threshold ?? 0.12);
+  onsetSilenceDbInput.value = String(config.onset_silence_db ?? -80);
+  updateOnsetReadout(onsetMinIntervalInput.value);
+  updateOnsetThresholdReadout(onsetThresholdInput.value);
+  updateOnsetSilenceReadout(onsetSilenceDbInput.value);
+  onsetControlsReady = true;
+}
+
+function pushOnsetParams() {
+  if (!onsetControlsReady) {
+    return;
+  }
+  window.pakshi.sendCommand({
+    command: "set_params",
+    params: {
+      onset_method: onsetMethodSelect.value,
+      onset_hop_size: Number(onsetHopSizeSelect.value),
+      onset_min_interval_seconds: Number(onsetMinIntervalInput.value),
+      onset_threshold: Number(onsetThresholdInput.value),
+      onset_silence_db: Number(onsetSilenceDbInput.value),
+    },
+  });
 }
 
 function updateSetupSummary(event) {
@@ -151,6 +204,20 @@ document.getElementById("arm-worker").addEventListener("click", (event) => {
 
 setupBundleDir.addEventListener("input", (event) => syncBundleFields(event.target.value));
 performanceBundleDir.addEventListener("input", (event) => syncBundleFields(event.target.value));
+onsetMethodSelect.addEventListener("change", pushOnsetParams);
+onsetHopSizeSelect.addEventListener("change", pushOnsetParams);
+onsetMinIntervalInput.addEventListener("input", (event) => {
+  updateOnsetReadout(event.target.value);
+  pushOnsetParams();
+});
+onsetThresholdInput.addEventListener("input", (event) => {
+  updateOnsetThresholdReadout(event.target.value);
+  pushOnsetParams();
+});
+onsetSilenceDbInput.addEventListener("input", (event) => {
+  updateOnsetSilenceReadout(event.target.value);
+  pushOnsetParams();
+});
 
 window.addEventListener("load", () => {
   window.pakshi.sendCommand({ command: "get_state" });
@@ -180,6 +247,7 @@ window.pakshi.onWorkerEvent((event) => {
     gateCloseDb = event.gate_close_db ?? gateCloseDb;
     updateMarkers();
     updateSetupSummary(event);
+    syncOnsetControls(event.config);
     setMode(setupMode || !isCalibrated ? "setup" : "performance");
     setCueState(event.state);
   }
@@ -241,23 +309,34 @@ window.pakshi.onWorkerEvent((event) => {
     monitorReadout.textContent = `level ${event.envelope_db.toFixed(1)} dB | gate ${event.gate_state}`;
   }
   if (event.type === "phrase_summary") {
-    appendListItem(playbackList, `phrase ${event.phrase_id}: ${event.duration_seconds.toFixed(2)} s, ${event.num_segments} segments`);
+    const onsets = (event.onset_offsets_seconds || []).map((value) => value.toFixed(2)).join(", ");
+    appendListItem(
+      playbackList,
+      `phrase ${event.phrase_id}: ${event.duration_seconds.toFixed(2)} s, ${event.num_onsets} onsets, ${event.num_segments} onset windows [${onsets}]`
+    );
   }
   if (event.type === "segments_created") {
-    appendListItem(segmentsList, `phrase ${event.phrase_id}: ${event.num_segments} segments`);
+    const onsets = (event.onset_offsets_seconds || []).map((value) => value.toFixed(2)).join(", ");
+    appendListItem(segmentsList, `phrase ${event.phrase_id}: ${event.num_segments} segments from ${event.num_onsets} onsets [${onsets}]`);
+  }
+  if (event.type === "onset_debug_saved") {
+    appendListItem(playbackList, `phrase ${event.phrase_id}: onset debug saved (${event.num_onsets} onsets) -> ${event.path}`);
   }
   if (event.type === "retrieval_sequence_ready") {
     appendListItem(
       segmentsList,
-      `phrase ${event.phrase_id}: matches ${event.matches.map((match) => match.metadata.name || match.metadata.path || match.corpus_index).join(" | ")}`
+      `phrase ${event.phrase_id}: matches ${event.matches.map((match) => `${match.metadata.name || match.metadata.path || match.corpus_index}@${match.scheduled_offset_seconds.toFixed(2)}s`).join(" | ")}`
     );
-    appendListItem(playbackList, `phrase ${event.phrase_id}: stitching ${event.num_segments} vocalisations`);
+    appendListItem(playbackList, `phrase ${event.phrase_id}: scheduling ${event.num_segments} vocalisations from ${event.num_segments} onsets`);
   }
   if (event.type === "segment_playback_started") {
-    appendListItem(playbackList, `phrase ${event.phrase_id} seg ${event.segment_index} started`);
+    appendListItem(playbackList, `phrase ${event.phrase_id} seg ${event.segment_index} started @ ${event.scheduled_offset_seconds.toFixed(2)} s`);
   }
   if (event.type === "segment_playback_finished") {
     appendListItem(playbackList, `phrase ${event.phrase_id} seg ${event.segment_index} finished`);
+  }
+  if (event.type === "sequence_playback_finished") {
+    appendListItem(playbackList, `phrase ${event.phrase_id}: sequence finished`);
   }
   if (event.type === "queue_cleared") {
     appendListItem(playbackList, "queue cleared, phrase buffer reset");

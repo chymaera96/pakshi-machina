@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import librosa
 import numpy as np
@@ -129,15 +129,24 @@ class PlaybackHandle:
     thread: threading.Thread
 
 
+@dataclass
+class ScheduledVoice:
+    match: dict
+    audio: np.ndarray
+    position: int = 0
+
+
 class NoopSequencePlayer:
     def __init__(
         self,
         on_started: Callable[[int, dict], None],
         on_finished: Callable[[int, dict], None],
         stitch_gap_seconds: float = 0.15,
+        on_sequence_finished: Optional[Callable[[int], None]] = None,
     ):
         self.on_started = on_started
         self.on_finished = on_finished
+        self.on_sequence_finished = on_sequence_finished
         self.stitch_gap_seconds = stitch_gap_seconds
         self._handle: Optional[PlaybackHandle] = None
 
@@ -145,7 +154,7 @@ class NoopSequencePlayer:
         if self._handle is None:
             return
         self._handle.stop_event.set()
-        self._handle.thread.join(timeout=0.2)
+        self._handle.thread.join(timeout=0.5)
         self._handle = None
 
     def play_sequence(self, phrase_id: int, matches: Sequence[dict]) -> None:
@@ -153,17 +162,39 @@ class NoopSequencePlayer:
         stop_event = threading.Event()
 
         def runner() -> None:
-            for index, match in enumerate(matches):
+            workers: List[threading.Thread] = []
+            sequence_started_at = time.monotonic()
+
+            def finish_match(match: dict, duration: float) -> None:
+                if duration > 0 and stop_event.wait(timeout=duration):
+                    return
+                if stop_event.is_set():
+                    return
+                self.on_finished(phrase_id, match)
+
+            for match in matches:
+                if stop_event.is_set():
+                    return
+                target = max(0.0, float(match.get("scheduled_offset_seconds", 0.0)))
+                while not stop_event.is_set():
+                    remaining = target - (time.monotonic() - sequence_started_at)
+                    if remaining <= 0:
+                        break
+                    stop_event.wait(timeout=min(remaining, 0.01))
                 if stop_event.is_set():
                     return
                 self.on_started(phrase_id, match)
                 duration = float(match.get("metadata", {}).get("duration_seconds", 0.0) or 0.0)
-                if duration > 0:
-                    stop_event.wait(timeout=duration)
-                self.on_finished(phrase_id, match)
-                if index < len(matches) - 1 and self.stitch_gap_seconds > 0:
-                    if stop_event.wait(timeout=self.stitch_gap_seconds):
+                thread = threading.Thread(target=finish_match, args=(match, duration), daemon=True)
+                thread.start()
+                workers.append(thread)
+
+            for thread in workers:
+                while thread.is_alive():
+                    if stop_event.wait(timeout=0.01):
                         return
+            if not stop_event.is_set() and self.on_sequence_finished is not None:
+                self.on_sequence_finished(phrase_id)
 
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
@@ -181,39 +212,146 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
         on_started: Callable[[int, dict], None],
         on_finished: Callable[[int, dict], None],
         stitch_gap_seconds: float = 0.15,
+        on_sequence_finished: Optional[Callable[[int], None]] = None,
     ):
         if sd is None:  # pragma: no cover
             raise RuntimeError("sounddevice is not installed. Add sounddevice to enable audio playback.")
-        super().__init__(on_started=on_started, on_finished=on_finished, stitch_gap_seconds=stitch_gap_seconds)
+        super().__init__(
+            on_started=on_started,
+            on_finished=on_finished,
+            stitch_gap_seconds=stitch_gap_seconds,
+            on_sequence_finished=on_sequence_finished,
+        )
         self.sample_rate = sample_rate
         self.output_gain = output_gain
+        self._cache: Dict[str, np.ndarray] = {}
+
+    def _load_clip(self, path: str) -> np.ndarray:
+        if path not in self._cache:
+            audio, _ = librosa.load(Path(path), sr=self.sample_rate, mono=True)
+            self._cache[path] = (audio * self.output_gain).astype(np.float32)
+        return self._cache[path]
 
     def play_sequence(self, phrase_id: int, matches: Sequence[dict]) -> None:
         self.stop()
         stop_event = threading.Event()
 
         def runner() -> None:
-            for index, match in enumerate(matches):
-                if stop_event.is_set():
-                    return
-                path = match.get("metadata", {}).get("path")
-                if not path:
-                    continue
-                self.on_started(phrase_id, match)
-                audio, sr = librosa.load(Path(path), sr=self.sample_rate, mono=True)
-                if audio.size:
-                    sd.play((audio * self.output_gain).astype(np.float32), self.sample_rate, blocking=False)
-                    start = time.time()
-                    while sd.get_stream().active:
-                        if stop_event.wait(timeout=0.05):
-                            sd.stop()
+            active_voices: List[ScheduledVoice] = []
+            finished_queue: "queue.Queue[dict]" = queue.Queue()
+            lock = threading.Lock()
+            stream = None
+
+            def drain_finished() -> None:
+                while True:
+                    try:
+                        match = finished_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    self.on_finished(phrase_id, match)
+
+            def callback(outdata, frames, time_info, status):  # pragma: no cover
+                mixed = np.zeros(frames, dtype=np.float32)
+                completed: List[dict] = []
+                with lock:
+                    survivors: List[ScheduledVoice] = []
+                    for voice in active_voices:
+                        remaining = voice.audio.size - voice.position
+                        if remaining <= 0:
+                            completed.append(voice.match)
+                            continue
+                        take = min(frames, remaining)
+                        mixed[:take] += voice.audio[voice.position : voice.position + take]
+                        voice.position += take
+                        if voice.position >= voice.audio.size:
+                            completed.append(voice.match)
+                        else:
+                            survivors.append(voice)
+                    active_voices[:] = survivors
+                outdata[:, 0] = np.clip(mixed, -1.0, 1.0)
+                for match in completed:
+                    finished_queue.put(match)
+
+            try:
+                try:
+                    stream = sd.OutputStream(
+                        samplerate=self.sample_rate,
+                        channels=1,
+                        dtype="float32",
+                        callback=callback,
+                    )
+                    stream.start()
+                except Exception:
+                    sequence_started_at = time.monotonic()
+                    for match in matches:
+                        target = max(0.0, float(match.get("scheduled_offset_seconds", 0.0)))
+                        while not stop_event.is_set():
+                            remaining = target - (time.monotonic() - sequence_started_at)
+                            if remaining <= 0:
+                                break
+                            stop_event.wait(timeout=min(remaining, 0.01))
+                        if stop_event.is_set():
                             return
-                        if time.time() - start > (len(audio) / self.sample_rate + 1.0):
+                        self.on_started(phrase_id, match)
+                        if stop_event.is_set():
+                            return
+                        path = match.get("metadata", {}).get("path")
+                        if not path:
+                            self.on_finished(phrase_id, match)
+                            continue
+                        try:
+                            audio = self._load_clip(path)
+                        except Exception:
+                            self.on_finished(phrase_id, match)
+                            continue
+                        duration = float(audio.size) / float(self.sample_rate) if audio.size else 0.0
+                        if duration > 0.0:
+                            stop_event.wait(timeout=duration)
+                        if stop_event.is_set():
+                            return
+                        self.on_finished(phrase_id, match)
+                    return
+
+                sequence_started_at = time.monotonic()
+                for match in matches:
+                    target = max(0.0, float(match.get("scheduled_offset_seconds", 0.0)))
+                    while not stop_event.is_set():
+                        drain_finished()
+                        remaining = target - (time.monotonic() - sequence_started_at)
+                        if remaining <= 0:
                             break
-                self.on_finished(phrase_id, match)
-                if index < len(matches) - 1 and self.stitch_gap_seconds > 0:
-                    if stop_event.wait(timeout=self.stitch_gap_seconds):
+                        stop_event.wait(timeout=min(remaining, 0.01))
+                    if stop_event.is_set():
                         return
+                    path = match.get("metadata", {}).get("path")
+                    self.on_started(phrase_id, match)
+                    if not path:
+                        self.on_finished(phrase_id, match)
+                        continue
+                    audio = self._load_clip(path)
+                    if audio.size == 0:
+                        self.on_finished(phrase_id, match)
+                        continue
+                    with lock:
+                        active_voices.append(ScheduledVoice(match=match, audio=audio))
+
+                while not stop_event.is_set():
+                    drain_finished()
+                    with lock:
+                        done = not active_voices
+                    if done:
+                        break
+                    stop_event.wait(timeout=0.01)
+                drain_finished()
+            finally:
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:
+                        pass
+                if not stop_event.is_set() and self.on_sequence_finished is not None:
+                    self.on_sequence_finished(phrase_id)
 
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()

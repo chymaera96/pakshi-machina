@@ -13,6 +13,7 @@ import numpy as np
 from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlayer, build_level_estimator
 from .config import RuntimeConfig
 from .corpus import CorpusBundle, load_corpus_bundle
+from .onsets import save_onset_debug_plot
 from .retrieval import OnnxEmbeddingModel, RetrievalEngine
 from .segmentation import PhraseSegmenter, SegmentedPhrase
 
@@ -46,7 +47,6 @@ class SegmentedPhraseWorker:
         self._candidate_gate_close_db: Optional[float] = None
         self._resume_after_playback = False
         self._active_playback_phrase_id: Optional[int] = None
-        self._active_playback_last_index: Optional[int] = None
 
     def _build_player(self):
         try:
@@ -56,12 +56,14 @@ class SegmentedPhraseWorker:
                 stitch_gap_seconds=self.config.stitch_gap_seconds,
                 on_started=self._emit_segment_started,
                 on_finished=self._emit_segment_finished,
+                on_sequence_finished=self._emit_sequence_finished,
             )
         except Exception:
             return NoopSequencePlayer(
                 on_started=self._emit_segment_started,
                 on_finished=self._emit_segment_finished,
                 stitch_gap_seconds=self.config.stitch_gap_seconds,
+                on_sequence_finished=self._emit_sequence_finished,
             )
 
     def handle_command(self, command: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -362,6 +364,29 @@ class SegmentedPhraseWorker:
         )
         return self._expand_events(events)
 
+    def _save_onset_debug(self, phrase: SegmentedPhrase) -> Optional[Dict[str, Any]]:
+        if not self.config.save_onset_debug_plots:
+            return None
+        try:
+            repo_root = Path(self.model_path).resolve().parent
+            output_path = repo_root / self.config.onset_debug_dir / f"phrase_{phrase.phrase_id:04d}.png"
+            saved = save_onset_debug_plot(
+                phrase.onset_analysis,
+                output_path,
+                title=f"Phrase {phrase.phrase_id} onset debug",
+            )
+            return {
+                "type": "onset_debug_saved",
+                "phrase_id": phrase.phrase_id,
+                "path": str(saved),
+                "num_onsets": len(phrase.onset_offsets_seconds),
+            }
+        except Exception as exc:
+            return {
+                "type": "error",
+                "message": f"failed to save onset debug plot for phrase {phrase.phrase_id}: {exc}",
+            }
+
     def _expand_events(self, events: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for event in events:
@@ -378,12 +403,18 @@ class SegmentedPhraseWorker:
                         "phrase_id": phrase.phrase_id,
                         "duration_seconds": phrase.waveform.size / self.config.sample_rate,
                         "num_segments": len(phrase.segments),
+                        "num_onsets": len(phrase.onset_offsets_seconds),
+                        "onset_offsets_seconds": phrase.onset_offsets_seconds,
                     }
                 )
+                debug_event = self._save_onset_debug(phrase)
+                if debug_event is not None:
+                    out.append(debug_event)
                 retrieval = self._retrieve_phrase(phrase)
-                out.append(retrieval.to_event())
+                retrieval_event = retrieval.to_event()
+                out.append(retrieval_event)
                 out.append(self._state_event("playing_sequence" if retrieval.matches else "listening"))
-                self._schedule_sequence(retrieval.to_event())
+                self._schedule_sequence(retrieval_event)
         return out
 
     def _retrieve_phrase(self, phrase: SegmentedPhrase):
@@ -395,7 +426,6 @@ class SegmentedPhraseWorker:
         if self.armed:
             self._resume_after_playback = True
             self._active_playback_phrase_id = int(event["phrase_id"])
-            self._active_playback_last_index = max(0, int(event["num_segments"]) - 1)
             self._stop_mic()
         self._player.play_sequence(event["phrase_id"], event["matches"])
 
@@ -405,6 +435,7 @@ class SegmentedPhraseWorker:
                 "type": "segment_playback_started",
                 "phrase_id": phrase_id,
                 "segment_index": match["segment_index"],
+                "scheduled_offset_seconds": match.get("scheduled_offset_seconds", 0.0),
                 "metadata": match["metadata"],
             }
         )
@@ -415,18 +446,16 @@ class SegmentedPhraseWorker:
                 "type": "segment_playback_finished",
                 "phrase_id": phrase_id,
                 "segment_index": match["segment_index"],
+                "scheduled_offset_seconds": match.get("scheduled_offset_seconds", 0.0),
                 "metadata": match["metadata"],
             }
         )
-        if (
-            self._resume_after_playback
-            and self.armed
-            and self._active_playback_phrase_id == phrase_id
-            and self._active_playback_last_index == match["segment_index"]
-        ):
+
+    def _emit_sequence_finished(self, phrase_id: int) -> None:
+        self.emit({"type": "sequence_playback_finished", "phrase_id": phrase_id})
+        if self._resume_after_playback and self.armed and self._active_playback_phrase_id == phrase_id:
             self._resume_after_playback = False
             self._active_playback_phrase_id = None
-            self._active_playback_last_index = None
             self._start_mic()
             self.emit(self._state_event("listening"))
 
@@ -438,6 +467,7 @@ class SegmentedPhraseWorker:
             "armed": self.armed,
             "calibrated": self.calibrated,
             "model_style": self.embedder.model_style,
+            "embedding_sample_rate": 16000,
             "setup_mode": self.setup_mode,
             "setup_stage": self._setup_stage,
             "config": asdict(self.config),

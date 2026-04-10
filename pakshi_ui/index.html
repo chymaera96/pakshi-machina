@@ -10,9 +10,9 @@
     <main class="app-shell">
       <section class="hero">
         <p class="eyebrow">Pakshi Machina</p>
-        <h1>Segmented Phrase Retrieval</h1>
+        <h1>CREPE Pitch-Latent Retrieval</h1>
         <p class="summary">
-          Noise-gated singing phrases are sliced into 1 second segments. Each segment retrieves one nearest sound.
+          Noise-gated singing phrases are segmented from detected onsets. Each onset launches a 0.5 second CREPE-latent query and bird responses follow the same rhythmic offsets.
         </p>
       </section>
 
@@ -57,6 +57,45 @@
         <label>
           Bundle directory
           <input id="bundle-dir-performance" type="text" value="./pakshi_bundle" />
+        </label>
+      </section>
+
+      <section class="onset-tuning panel compact-panel">
+        <div>
+          <p class="eyebrow eyebrow-small">Rhythm Tuning</p>
+          <h2>Onset Sensitivity</h2>
+          <p class="microcopy">Adjust how aggressively sung attacks become retrieval triggers.</p>
+        </div>
+        <label>
+          Onset method
+          <select id="onset-method">
+            <option value="specflux">SpecFlux</option>
+            <option value="hfc" selected>HFC</option>
+            <option value="complex">Complex</option>
+          </select>
+        </label>
+        <label>
+          Hop size
+          <select id="onset-hop-size">
+            <option value="128">128</option>
+            <option value="256">256</option>
+            <option value="512">512</option>
+          </select>
+        </label>
+        <label>
+          Minimum spacing
+          <input id="onset-min-interval" type="range" min="0.04" max="0.30" step="0.01" value="0.07" />
+          <span class="microcopy" id="onset-min-interval-value">70 ms</span>
+        </label>
+        <label>
+          Onset threshold
+          <input id="onset-threshold" type="range" min="0.01" max="0.60" step="0.01" value="0.12" />
+          <span class="microcopy" id="onset-threshold-value">0.12</span>
+        </label>
+        <label>
+          Silence floor
+          <input id="onset-silence-db" type="range" min="-100" max="-40" step="1" value="-75" />
+          <span class="microcopy" id="onset-silence-db-value">-75 dB</span>
         </label>
       </section>
 

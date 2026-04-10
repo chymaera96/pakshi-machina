@@ -93,6 +93,47 @@ body[data-mode="performance"] .setup-controls {
   min-width: 320px;
 }
 
+.onset-tuning {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) repeat(5, minmax(150px, 0.8fr));
+  gap: 16px;
+  align-items: end;
+  margin: 0 0 28px;
+}
+
+.compact-panel {
+  padding: 18px 20px;
+  min-height: 0;
+}
+
+.onset-tuning h2 {
+  margin: 4px 0 6px;
+}
+
+.eyebrow-small {
+  font-size: 0.78rem;
+}
+
+.onset-tuning label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+}
+
+select {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 18px;
+  font: inherit;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
+}
+
+input[type="range"] {
+  padding: 0;
+  background: transparent;
+}
+
 .setup-controls button:not(.mic-button) {
   min-width: 150px;
 }
@@ -385,9 +426,22 @@ ol {
   }
 }
 
+@media (max-width: 1180px) {
+  .onset-tuning {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .onset-tuning {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .cue-panel,
-  .status-grid {
+  .status-grid,
+  .onset-tuning {
     grid-template-columns: 1fr;
   }
 
