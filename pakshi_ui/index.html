@@ -12,7 +12,7 @@
         <p class="eyebrow">Pakshi Machina</p>
         <h1>EffNet-Bio Retrieval</h1>
         <p class="summary">
-          Noise-gated singing phrases are segmented from detected onsets. Each onset launches a 0.25 second EffNet-Bio query window. Live audio runs at 16 kHz, and each query is embedded directly from a local NumPy mel-spectrogram frontend.
+          Noise-gated singing phrases are segmented from CREPE pitch changes. Each pitch-change boundary launches a 0.25 second EffNet-Bio query window. Live audio runs at 16 kHz, and playback follows the original pitch-segment timing.
         </p>
       </section>
 
@@ -60,42 +60,20 @@
         </label>
       </section>
 
-      <section class="onset-tuning panel compact-panel">
+      <section class="pitch-tuning panel compact-panel">
         <div>
-          <p class="eyebrow eyebrow-small">Rhythm Tuning</p>
-          <h2>Onset Sensitivity</h2>
-          <p class="microcopy">Adjust how aggressively sung attacks become retrieval triggers.</p>
+          <p class="eyebrow eyebrow-small">Pitch Segmentation</p>
+          <h2>Pitch Change Sensitivity</h2>
+          <p class="microcopy">Adjust when a sung pitch change opens a new retrieval window.</p>
         </div>
         <label>
-          Onset method
-          <select id="onset-method">
-            <option value="specflux">SpecFlux</option>
-            <option value="hfc" selected>HFC</option>
-            <option value="complex">Complex</option>
-          </select>
+          Pitch change threshold
+          <input id="pitch-threshold-cents" type="range" min="20" max="300" step="10" value="100" />
+          <span class="microcopy" id="pitch-threshold-cents-value">100 cents</span>
         </label>
         <label>
-          Hop size
-          <select id="onset-hop-size">
-            <option value="128">128</option>
-            <option value="256">256</option>
-            <option value="512">512</option>
-          </select>
-        </label>
-        <label>
-          Minimum spacing
-          <input id="onset-min-interval" type="range" min="0.04" max="0.30" step="0.01" value="0.07" />
-          <span class="microcopy" id="onset-min-interval-value">70 ms</span>
-        </label>
-        <label>
-          Onset threshold
-          <input id="onset-threshold" type="range" min="0.01" max="0.60" step="0.01" value="0.12" />
-          <span class="microcopy" id="onset-threshold-value">0.12</span>
-        </label>
-        <label>
-          Silence floor
-          <input id="onset-silence-db" type="range" min="-100" max="-40" step="1" value="-75" />
-          <span class="microcopy" id="onset-silence-db-value">-75 dB</span>
+          Ignore short unvoiced gaps
+          <input id="pitch-ignore-short-gaps" type="checkbox" checked />
         </label>
       </section>
 
@@ -109,7 +87,7 @@
         <article class="panel">
           <h2>Setup</h2>
           <ol id="setup-list"></ol>
-          <p class="microcopy" id="setup-summary">noise -- | soft -- | open -- | close -- | live 16 kHz | onset 16 kHz</p>
+          <p class="microcopy" id="setup-summary">noise -- | soft -- | open -- | close -- | live 16 kHz | pitch 16 kHz</p>
         </article>
         <article class="panel">
           <h2>Playback</h2>

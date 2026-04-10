@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -13,16 +14,18 @@ import numpy as np
 from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlayer, build_level_estimator
 from .config import RuntimeConfig
 from .corpus import CorpusBundle, load_corpus_bundle
-from .onsets import save_onset_debug_plot
+from .pitch import CrepePitchTracker, save_pitch_debug_plot
 from .retrieval import EffNetBioEmbeddingModel, RetrievalEngine
 from .segmentation import PhraseSegmenter, SegmentedPhrase
 
 
 class SegmentedPhraseWorker:
-    def __init__(self, model_path: str | Path, config: Optional[RuntimeConfig] = None):
+    def __init__(self, model_path: str | Path, config: Optional[RuntimeConfig] = None, pitch_model_path: Optional[str | Path] = None):
         self.config = config or RuntimeConfig()
         self.model_path = str(model_path)
-        self.segmenter = PhraseSegmenter(self.config)
+        self.pitch_model_path = str(pitch_model_path or self.config.__dict__.get("pitch_model_path") or os.environ.get("PAKSHI_PITCH_MODEL_PATH", "crepe_pitch.onnx"))
+        self.pitch_tracker = CrepePitchTracker(self.pitch_model_path, frame_batch_size=self.config.pitch_frame_batch_size)
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         self.embedder = EffNetBioEmbeddingModel(
             self.model_path,
             input_sample_rate=self.config.sample_rate,
@@ -118,7 +121,8 @@ class SegmentedPhraseWorker:
         for key, value in params.items():
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
-        self.segmenter = PhraseSegmenter(self.config)
+        self.pitch_tracker = CrepePitchTracker(self.pitch_model_path, frame_batch_size=self.config.pitch_frame_batch_size)
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         self._player = self._build_player()
         self._smoothed_level_db = self.config.meter_floor_db
         self._level_estimator = build_level_estimator()
@@ -181,7 +185,7 @@ class SegmentedPhraseWorker:
         self._candidate_gate_open_db = None
         self._candidate_gate_close_db = None
         self._player.clear()
-        self.segmenter = PhraseSegmenter(self.config)
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         self._stop_mic()
         return [{"type": "setup_reset"}, self._state_event("setup")]
 
@@ -197,13 +201,13 @@ class SegmentedPhraseWorker:
     def _disarm_worker(self) -> List[Dict[str, Any]]:
         self.armed = False
         self._player.clear()
-        self.segmenter = PhraseSegmenter(self.config)
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         self._stop_mic()
         return [self._state_event("idle"), {"type": "queue_cleared"}]
 
     def _clear_queue_restart(self) -> List[Dict[str, Any]]:
         self._player.clear()
-        self.segmenter = PhraseSegmenter(self.config)
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         events = [{"type": "queue_cleared"}]
         if self.armed:
             self._stop_mic()
@@ -315,7 +319,7 @@ class SegmentedPhraseWorker:
             return
         self.config.gate_open_db = float(self._candidate_gate_open_db)
         self.config.gate_close_db = float(self._candidate_gate_close_db)
-        self.segmenter = PhraseSegmenter(self.config)
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         self.calibrated = True
         self.setup_mode = False
         self._setup_stage = "idle"
@@ -368,27 +372,27 @@ class SegmentedPhraseWorker:
         )
         return self._expand_events(events)
 
-    def _save_onset_debug(self, phrase: SegmentedPhrase) -> Optional[Dict[str, Any]]:
-        if not self.config.save_onset_debug_plots:
+    def _save_pitch_debug(self, phrase: SegmentedPhrase) -> Optional[Dict[str, Any]]:
+        if not self.config.save_pitch_debug_plots:
             return None
         try:
             repo_root = Path(self.model_path).resolve().parent
-            output_path = repo_root / self.config.onset_debug_dir / f"phrase_{phrase.phrase_id:04d}.png"
-            saved = save_onset_debug_plot(
-                phrase.onset_analysis,
+            output_path = repo_root / self.config.pitch_debug_dir / f"phrase_{phrase.phrase_id:04d}.png"
+            saved = save_pitch_debug_plot(
+                phrase.pitch_analysis,
                 output_path,
-                title=f"Phrase {phrase.phrase_id} onset debug",
+                title=f"Phrase {phrase.phrase_id} pitch debug",
             )
             return {
-                "type": "onset_debug_saved",
+                "type": "pitch_debug_saved",
                 "phrase_id": phrase.phrase_id,
                 "path": str(saved),
-                "num_onsets": len(phrase.onset_offsets_seconds),
+                "num_segments": len(phrase.segment_start_offsets_seconds),
             }
         except Exception as exc:
             return {
                 "type": "error",
-                "message": f"failed to save onset debug plot for phrase {phrase.phrase_id}: {exc}",
+                "message": f"failed to save pitch debug plot for phrase {phrase.phrase_id}: {exc}",
             }
 
     def _expand_events(self, events: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -407,11 +411,10 @@ class SegmentedPhraseWorker:
                         "phrase_id": phrase.phrase_id,
                         "duration_seconds": phrase.waveform.size / self.config.sample_rate,
                         "num_segments": len(phrase.segments),
-                        "num_onsets": len(phrase.onset_offsets_seconds),
-                        "onset_offsets_seconds": phrase.onset_offsets_seconds,
+                        "segment_start_offsets_seconds": phrase.segment_start_offsets_seconds,
                     }
                 )
-                debug_event = self._save_onset_debug(phrase)
+                debug_event = self._save_pitch_debug(phrase)
                 if debug_event is not None:
                     out.append(debug_event)
                 retrieval = self._retrieve_phrase(phrase)
@@ -472,12 +475,13 @@ class SegmentedPhraseWorker:
             "calibrated": self.calibrated,
             "model_style": self.embedder.model_style,
             "live_sample_rate": self.config.sample_rate,
-            "onset_sample_rate": self.config.onset_sample_rate,
+            "pitch_sample_rate": self.config.pitch_sample_rate,
             "embedding_sample_rate": 16000,
             "setup_mode": self.setup_mode,
             "setup_stage": self._setup_stage,
             "config": asdict(self.config),
             "model_path": self.model_path,
+            "pitch_model_path": self.pitch_model_path,
             "noise_floor_db": self.noise_floor_db,
             "singing_soft_db": self.singing_soft_db,
             "singing_median_db": self.singing_median_db,
@@ -512,6 +516,7 @@ class SegmentedPhraseWorker:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pakshi segmented phrase retrieval worker")
     parser.add_argument("--model", type=Path, required=True, help="Path to waveform->embedding ONNX model")
+    parser.add_argument("--pitch-model", type=Path, default=None, help="Path to CREPE pitch-segmentation ONNX model")
     parser.add_argument("--bundle", type=Path, default=None, help="Optional corpus bundle to load at startup")
     parser.add_argument("--arm", action="store_true", help="Start in armed/listening mode")
     return parser.parse_args()
@@ -519,7 +524,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    worker = SegmentedPhraseWorker(model_path=args.model)
+    worker = SegmentedPhraseWorker(model_path=args.model, pitch_model_path=args.pitch_model)
     if args.bundle is not None:
         for event in worker.handle_command({"command": "load_corpus", "bundle_dir": str(args.bundle)}):
             worker.emit(event)

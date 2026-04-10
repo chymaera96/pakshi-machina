@@ -7,7 +7,7 @@ from typing import Deque, Dict, List, Optional, Sequence
 import numpy as np
 
 from .config import RuntimeConfig
-from .onsets import OnsetAnalysis, analyze_onsets, detect_onset_offsets
+from .pitch import PitchAnalysis, PitchTracker, analyze_pitch_segments
 
 
 @dataclass
@@ -17,7 +17,7 @@ class Segment:
     end_sample: int
     start_seconds: float
     end_seconds: float
-    onset_seconds: float
+    segment_start_seconds: float
     scheduled_offset_seconds: float
     waveform: np.ndarray
 
@@ -30,8 +30,8 @@ class SegmentedPhrase:
     reason: str
     waveform: np.ndarray
     segments: List[Segment]
-    onset_offsets_seconds: List[float]
-    onset_analysis: OnsetAnalysis
+    segment_start_offsets_seconds: List[float]
+    pitch_analysis: PitchAnalysis
 
 
 def split_into_segments(
@@ -65,7 +65,7 @@ def split_into_segments(
                 end_sample=end,
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
-                onset_seconds=start_seconds,
+                segment_start_seconds=start_seconds,
                 scheduled_offset_seconds=start_seconds,
                 waveform=chunk,
             )
@@ -73,12 +73,12 @@ def split_into_segments(
     return segments
 
 
-def split_into_onset_segments(
+def split_into_pitch_segments(
     waveform: np.ndarray,
     *,
     sample_rate: int,
     segment_seconds: float,
-    onset_offsets_seconds: Sequence[float],
+    segment_start_offsets_seconds: Sequence[float],
 ) -> List[Segment]:
     segment_samples = int(round(segment_seconds * sample_rate))
     if segment_samples <= 0:
@@ -88,12 +88,16 @@ def split_into_onset_segments(
     if wav.size == 0:
         return []
 
-    if not onset_offsets_seconds:
-        onset_offsets_seconds = [0.0]
+    if not segment_start_offsets_seconds:
+        segment_start_offsets_seconds = [0.0]
+
+    starts = sorted({max(0.0, float(offset)) for offset in segment_start_offsets_seconds})
+    if not starts or starts[0] > 1e-6:
+        starts = [0.0] + starts
 
     segments: List[Segment] = []
-    for index, onset_seconds in enumerate(onset_offsets_seconds):
-        start = max(0, int(round(float(onset_seconds) * sample_rate)))
+    for index, segment_start_seconds in enumerate(starts):
+        start = max(0, int(round(segment_start_seconds * sample_rate)))
         end = min(start + segment_samples, wav.size)
         chunk = wav[start:end]
         if chunk.size < segment_samples:
@@ -107,8 +111,8 @@ def split_into_onset_segments(
                 end_sample=end,
                 start_seconds=start / sample_rate,
                 end_seconds=(start + segment_samples) / sample_rate,
-                onset_seconds=float(onset_seconds),
-                scheduled_offset_seconds=float(onset_seconds),
+                segment_start_seconds=float(segment_start_seconds),
+                scheduled_offset_seconds=float(segment_start_seconds),
                 waveform=chunk,
             )
         )
@@ -116,8 +120,9 @@ def split_into_onset_segments(
 
 
 class PhraseSegmenter:
-    def __init__(self, config: RuntimeConfig):
+    def __init__(self, config: RuntimeConfig, pitch_tracker: Optional[PitchTracker] = None):
         self.config = config
+        self.pitch_tracker = pitch_tracker
         self._pre_roll: Deque[float] = deque(maxlen=max(0, self.config.pre_roll_samples()))
         self._phrase_chunks: List[np.ndarray] = []
         self._active_phrase_id = 0
@@ -156,7 +161,7 @@ class PhraseSegmenter:
             else:
                 self._pending_voiced_samples = 0
 
-            if self._pending_voiced_samples >= self.config.onset_hold_samples():
+            if self._pending_voiced_samples >= self.config.gate_hold_samples():
                 self._start_phrase(now_seconds)
                 events.append(
                     {
@@ -215,15 +220,18 @@ class PhraseSegmenter:
             self._started_at_seconds = None
             return None
 
+        if self.pitch_tracker is None:
+            raise RuntimeError("Pitch tracker is not configured. Provide a CREPE pitch model before segmenting phrases.")
+
         started_at = self._started_at_seconds if self._started_at_seconds is not None else now_seconds
         self._started_at_seconds = None
-        onset_analysis = analyze_onsets(waveform, self.config.sample_rate, self.config)
-        onset_offsets = detect_onset_offsets(waveform, self.config.sample_rate, self.config)
-        segments = split_into_onset_segments(
+        pitch_analysis = analyze_pitch_segments(waveform, self.config.sample_rate, self.config, self.pitch_tracker)
+        segment_starts = list(pitch_analysis.segment_start_offsets_seconds)
+        segments = split_into_pitch_segments(
             waveform,
             sample_rate=self.config.sample_rate,
             segment_seconds=self.config.segment_seconds,
-            onset_offsets_seconds=onset_offsets,
+            segment_start_offsets_seconds=segment_starts,
         )
         return SegmentedPhrase(
             phrase_id=self._active_phrase_id,
@@ -232,8 +240,8 @@ class PhraseSegmenter:
             reason=reason,
             waveform=waveform,
             segments=segments,
-            onset_offsets_seconds=list(onset_offsets),
-            onset_analysis=onset_analysis,
+            segment_start_offsets_seconds=segment_starts,
+            pitch_analysis=pitch_analysis,
         )
 
     def _phrase_to_events(self, phrase: Optional[SegmentedPhrase]) -> List[Dict[str, object]]:
@@ -248,7 +256,7 @@ class PhraseSegmenter:
                 "start_sample": seg.start_sample,
                 "end_sample": seg.end_sample,
                 "num_samples": int(seg.waveform.size),
-                "onset_seconds": seg.onset_seconds,
+                "segment_start_seconds": seg.segment_start_seconds,
                 "scheduled_offset_seconds": seg.scheduled_offset_seconds,
             }
             for seg in phrase.segments
@@ -266,8 +274,7 @@ class PhraseSegmenter:
                 "type": "segments_created",
                 "phrase_id": phrase.phrase_id,
                 "num_segments": len(phrase.segments),
-                "num_onsets": len(phrase.onset_offsets_seconds),
-                "onset_offsets_seconds": phrase.onset_offsets_seconds,
+                "segment_start_offsets_seconds": phrase.segment_start_offsets_seconds,
                 "segments": segments_payload,
                 "phrase": phrase,
             },

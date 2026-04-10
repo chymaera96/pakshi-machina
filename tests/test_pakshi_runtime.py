@@ -1,8 +1,8 @@
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-import sys
 from unittest import mock
 
 import numpy as np
@@ -15,6 +15,8 @@ from setup_ml4bl import write_wav_manifest
 from src.pakshi.audio import NoopSequencePlayer, rms_dbfs
 from src.pakshi.config import RuntimeConfig
 from src.pakshi.corpus import load_corpus_bundle, write_metadata_jsonl
+from src.pakshi.pitch import PitchAnalysis
+from src.pakshi import pitch as pitch_module
 from src.pakshi.retrieval import (
     EFFNET_BIO_CLIP_SAMPLES,
     EFFNET_BIO_SAMPLE_RATE,
@@ -25,7 +27,7 @@ from src.pakshi.retrieval import (
     normalize_rows,
     preprocess_effnet_bio_waveform,
 )
-from src.pakshi.segmentation import PhraseSegmenter, split_into_onset_segments, split_into_segments
+from src.pakshi.segmentation import PhraseSegmenter, split_into_pitch_segments, split_into_segments
 from src.pakshi.worker import SegmentedPhraseWorker
 
 
@@ -48,7 +50,7 @@ class DummyEmbedder:
 class FakeEffNetSession:
     def __init__(self):
         self.last_feed = None
-        self._inputs = [type("Input", (), {"name": "mel_spec"})()]
+        self._inputs = [type("Input", (), {"name": "mel_spec", "shape": [None, 3, 128, 26]})()]
         self._outputs = [type("Output", (), {"name": "embedding"})()]
 
     def get_inputs(self):
@@ -83,6 +85,24 @@ class FakeEffNetBioEmbeddingModel:
         means = processed.mean(axis=1, keepdims=True)
         maxes = processed.max(axis=1, keepdims=True)
         return np.concatenate([means, maxes], axis=1).astype(np.float32)
+
+
+class FakePitchTracker:
+    def __init__(self, model_path, providers=None, frame_batch_size=512):
+        self.model_path = str(model_path)
+        self.frame_batch_size = frame_batch_size
+
+    def analyze(self, waveform, sample_rate, config):
+        return PitchAnalysis(
+            segment_start_offsets_seconds=[0.0, 1.0, 2.0],
+            frame_times_seconds=[0.0, 0.01, 0.02],
+            pitch_hz=[220.0, 246.94, 261.63],
+            pitch_cents=[5700.0, 5800.0, 5900.0],
+            confidence=[0.95, 0.96, 0.97],
+            change_threshold_cents=float(config.pitch_change_threshold_cents),
+            confidence_floor=float(config.pitch_confidence_floor),
+            ignore_short_gaps=bool(config.pitch_ignore_short_gaps),
+        )
 
 
 class FakeLiveInputStream:
@@ -145,14 +165,14 @@ class PakshiRuntimeTests(unittest.TestCase):
         np.testing.assert_array_equal(segments[2].waveform[:5], waveform[20:25])
         np.testing.assert_array_equal(segments[2].waveform[5:], np.zeros(5, dtype=np.float32))
 
-    def test_split_into_onset_segments_uses_offsets(self):
+    def test_split_into_pitch_segments_uses_offsets(self):
         sr = 10
         waveform = np.arange(30, dtype=np.float32)
-        segments = split_into_onset_segments(
+        segments = split_into_pitch_segments(
             waveform,
             sample_rate=sr,
             segment_seconds=1.0,
-            onset_offsets_seconds=[0.0, 1.2],
+            segment_start_offsets_seconds=[0.0, 1.2],
         )
         self.assertEqual(len(segments), 2)
         self.assertEqual(segments[1].start_sample, 12)
@@ -161,56 +181,79 @@ class PakshiRuntimeTests(unittest.TestCase):
     def test_phrase_segmenter_detects_single_phrase(self):
         cfg = RuntimeConfig(
             sample_rate=10,
-            onset_sample_rate=10,
+            pitch_sample_rate=10,
             segment_seconds=1.0,
             pre_roll_seconds=0.0,
             gate_open_db=-40.0,
             gate_close_db=-48.0,
-            onset_hold_seconds=0.1,
+            gate_hold_seconds=0.1,
             release_seconds=0.2,
             min_phrase_seconds=0.2,
             max_phrase_seconds=10.0,
         )
-        segmenter = PhraseSegmenter(cfg)
-        with mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0]), mock.patch(
-            "src.pakshi.segmentation.analyze_onsets",
-            return_value=mock.Mock(onset_offsets_seconds=[0.0], descriptor_times_seconds=[], descriptor_values=[], threshold=0.12, silence_db=-75.0, method="hfc"),
-        ):
-            events = []
-            events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=0.0))
-            events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=1.0))
-            events.extend(segmenter.process_frame(np.zeros(10, dtype=np.float32), -90.0, now_seconds=2.0))
+        segmenter = PhraseSegmenter(cfg, pitch_tracker=FakePitchTracker("crepe_pitch.onnx"))
+        events = []
+        events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=0.0))
+        events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=1.0))
+        events.extend(segmenter.process_frame(np.zeros(10, dtype=np.float32), -90.0, now_seconds=2.0))
         kinds = [event["type"] for event in events]
         self.assertIn("phrase_started", kinds)
         self.assertIn("phrase_ended", kinds)
         self.assertIn("segments_created", kinds)
 
-    def test_phrase_segmenter_uses_onset_offsets_for_segments(self):
+    def test_phrase_segmenter_uses_pitch_segment_starts(self):
         cfg = RuntimeConfig(
             sample_rate=10,
-            onset_sample_rate=10,
+            pitch_sample_rate=10,
             segment_seconds=1.0,
             pre_roll_seconds=0.0,
             gate_open_db=-40.0,
             gate_close_db=-48.0,
-            onset_hold_seconds=0.1,
+            gate_hold_seconds=0.1,
             release_seconds=0.2,
             min_phrase_seconds=0.2,
             max_phrase_seconds=10.0,
         )
-        segmenter = PhraseSegmenter(cfg)
-        fake_analysis = mock.Mock(onset_offsets_seconds=[0.0, 1.0], descriptor_times_seconds=[], descriptor_values=[], threshold=0.12, silence_db=-75.0, method="hfc")
-        with mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0, 1.0]), mock.patch(
-            "src.pakshi.segmentation.analyze_onsets", return_value=fake_analysis
-        ):
-            events = []
-            events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=0.0))
-            events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=1.0))
-            events.extend(segmenter.process_frame(np.zeros(10, dtype=np.float32), -90.0, now_seconds=2.0))
+        segmenter = PhraseSegmenter(cfg, pitch_tracker=FakePitchTracker("crepe_pitch.onnx"))
+        events = []
+        events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=0.0))
+        events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=1.0))
+        events.extend(segmenter.process_frame(np.zeros(10, dtype=np.float32), -90.0, now_seconds=2.0))
         segments_event = next(event for event in events if event["type"] == "segments_created")
-        self.assertEqual(segments_event["num_segments"], 2)
-        self.assertEqual(segments_event["num_onsets"], 2)
-        self.assertEqual(segments_event["onset_offsets_seconds"], [0.0, 1.0])
+        self.assertEqual(segments_event["num_segments"], 3)
+        self.assertEqual(segments_event["segment_start_offsets_seconds"], [0.0, 1.0, 2.0])
+
+    def test_pitch_segmenter_skips_end_of_phrase_tail_segments(self):
+        cfg = RuntimeConfig(
+            pitch_sample_rate=16000,
+            pitch_change_threshold_cents=100.0,
+            pitch_confidence_floor=0.5,
+            pitch_stable_hold_seconds=0.03,
+            pitch_min_segment_spacing_seconds=0.12,
+            pitch_phrase_end_guard_seconds=0.2,
+        )
+        frame_times = np.array([0.00, 0.01, 0.02, 0.03, 0.04, 0.05, 0.22, 0.23, 0.24, 0.25], dtype=np.float32)
+        cents = np.array([5700, 5700, 5700, 5700, 5700, 5700, 5820, 5820, 5820, 5820], dtype=np.float32)
+        confidence = np.full(frame_times.shape, 0.9, dtype=np.float32)
+        starts = pitch_module._derive_segment_starts(frame_times, cents, confidence, cfg)
+        self.assertEqual(starts, [0.0])
+
+    def test_pitch_segmenter_respects_min_spacing_for_short_instability(self):
+        cfg = RuntimeConfig(
+            pitch_sample_rate=16000,
+            pitch_change_threshold_cents=100.0,
+            pitch_confidence_floor=0.5,
+            pitch_stable_hold_seconds=0.03,
+            pitch_min_segment_spacing_seconds=0.12,
+            pitch_phrase_end_guard_seconds=0.0,
+        )
+        frame_times = np.array([0.00, 0.01, 0.02, 0.14, 0.15, 0.16, 0.20, 0.21, 0.22], dtype=np.float32)
+        cents = np.array([5700, 5700, 5700, 5820, 5820, 5820, 5700, 5700, 5700], dtype=np.float32)
+        confidence = np.full(frame_times.shape, 0.9, dtype=np.float32)
+        starts = pitch_module._derive_segment_starts(frame_times, cents, confidence, cfg)
+        self.assertEqual(len(starts), 2)
+        self.assertAlmostEqual(starts[0], 0.0, places=5)
+        self.assertAlmostEqual(starts[1], 0.14, places=5)
 
     def test_retrieval_normalizes_before_search(self):
         metadata = [{"path": "a.wav", "name": "A"}, {"path": "b.wav", "name": "B"}]
@@ -232,6 +275,7 @@ class PakshiRuntimeTests(unittest.TestCase):
         model.input_name = "mel_spec"
         model.output_name = "embedding"
         model.model_style = "effnet_bio_emb1024"
+        model._fixed_batch_size = None
         out = model.embed_batch(np.ones((2, EFFNET_BIO_CLIP_SAMPLES), dtype=np.float32), sample_rate=16000)
         self.assertEqual(model.session.last_feed.shape, (2, 3, 128, 26))
         self.assertEqual(out.shape, (2, 1024))
@@ -264,23 +308,23 @@ class PakshiRuntimeTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
         with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
-            "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
-        ):
-            worker = SegmentedPhraseWorker(model_path=model_path)
+            "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
+        ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
+            worker = SegmentedPhraseWorker(model_path=model_path, pitch_model_path="crepe_pitch.onnx")
             events = worker.handle_command({"command": "load_corpus", "bundle_dir": str(repo_root / "pakshi_bundle")})
             self.assertEqual(events[0]["type"], "state")
             self.assertEqual(events[0]["model_style"], "effnet_bio_emb1024")
             self.assertEqual(events[0]["live_sample_rate"], 16000)
-            self.assertEqual(events[0]["onset_sample_rate"], 16000)
+            self.assertEqual(events[0]["pitch_sample_rate"], 16000)
             self.assertEqual(events[0]["embedding_sample_rate"], 16000)
 
     def test_setup_flow_derives_thresholds_and_finishes(self):
         model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
-        cfg = RuntimeConfig(sample_rate=100, onset_sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
+        cfg = RuntimeConfig(sample_rate=100, pitch_sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
         with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
-            "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
-        ):
-            worker = SegmentedPhraseWorker(model_path=model_path, config=cfg)
+            "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
+        ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
+            worker = SegmentedPhraseWorker(model_path=model_path, config=cfg, pitch_model_path="crepe_pitch.onnx")
             emitted = []
             worker.emit = lambda event: emitted.append(event)
             worker.handle_command({"command": "start_setup"})
@@ -298,11 +342,11 @@ class PakshiRuntimeTests(unittest.TestCase):
 
     def test_setup_rejects_small_separation(self):
         model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
-        cfg = RuntimeConfig(sample_rate=100, onset_sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
+        cfg = RuntimeConfig(sample_rate=100, pitch_sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
         with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
-            "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
-        ):
-            worker = SegmentedPhraseWorker(model_path=model_path, config=cfg)
+            "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
+        ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
+            worker = SegmentedPhraseWorker(model_path=model_path, config=cfg, pitch_model_path="crepe_pitch.onnx")
             emitted = []
             worker.emit = lambda event: emitted.append(event)
             worker.handle_command({"command": "start_setup"})
@@ -322,28 +366,25 @@ class PakshiRuntimeTests(unittest.TestCase):
         model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
         cfg = RuntimeConfig(
             sample_rate=10,
-            onset_sample_rate=10,
+            pitch_sample_rate=10,
             segment_seconds=1.0,
             pre_roll_seconds=0.0,
             gate_open_db=-40.0,
             gate_close_db=-48.0,
-            onset_hold_seconds=0.1,
+            gate_hold_seconds=0.1,
             release_seconds=0.2,
             min_phrase_seconds=0.2,
             max_phrase_seconds=12.0,
         )
-        fake_analysis = mock.Mock(onset_offsets_seconds=[0.0, 1.0, 2.0], descriptor_times_seconds=[], descriptor_values=[], threshold=0.12, silence_db=-75.0, method="hfc")
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
             embeddings = normalize_rows(np.array([[1.0, 1.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float32))
             np.save(bundle / "embeddings.npy", embeddings)
             write_metadata_jsonl([{"path": "a.wav", "name": "A"}, {"path": "b.wav", "name": "B"}, {"path": "c.wav", "name": "C"}], bundle / "metadata.jsonl")
             with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
-                "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
-            ), mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0, 1.0, 2.0]), mock.patch(
-                "src.pakshi.segmentation.analyze_onsets", return_value=fake_analysis
-            ):
-                worker = SegmentedPhraseWorker(model_path=model_path, config=cfg)
+                "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
+            ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
+                worker = SegmentedPhraseWorker(model_path=model_path, config=cfg, pitch_model_path="crepe_pitch.onnx")
                 worker.handle_command({"command": "load_corpus", "bundle_dir": str(bundle)})
                 worker.calibrated = True
                 worker.handle_command({"command": "arm"})
@@ -352,7 +393,7 @@ class PakshiRuntimeTests(unittest.TestCase):
                 self.assertEqual(retrieval["num_segments"], 3)
                 self.assertEqual([match["scheduled_offset_seconds"] for match in retrieval["matches"]], [0.0, 1.0, 2.0])
 
-    def test_noop_sequence_player_preserves_onset_offsets(self):
+    def test_noop_sequence_player_preserves_pitch_segment_offsets(self):
         started = []
         finished = []
         done = []

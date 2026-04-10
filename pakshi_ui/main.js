@@ -30,32 +30,57 @@ function resolvePython(repoRoot) {
 }
 
 function resolveModel(repoRoot) {
-  const candidates = [];
   if (process.env.PAKSHI_MODEL_PATH && fs.existsSync(process.env.PAKSHI_MODEL_PATH)) {
     return process.env.PAKSHI_MODEL_PATH;
   }
-  const downloadsEffnetBio = path.join(process.env.HOME || "", "Downloads", "trained_models", "effnet_bio", "effnet_bio_zf_emb1024.onnx");
-  if (fs.existsSync(downloadsEffnetBio)) {
-    return downloadsEffnetBio;
+  const candidates = [
+    path.join(repoRoot, "effnet_bio_zf_emb1024.onnx"),
+    path.join(process.env.HOME || "", "Downloads", "trained_models", "effnet_bio", "effnet_bio_zf_emb1024.onnx"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
   const onnxFiles = fs
     .readdirSync(repoRoot)
-    .filter((name) => name.toLowerCase().endsWith(".onnx"))
+    .filter((name) => name.toLowerCase().endsWith(".onnx") && name.toLowerCase().includes("effnet"))
     .sort()
     .map((name) => path.join(repoRoot, name));
-  candidates.push(...onnxFiles);
-  const unique = [...new Set(candidates)];
+  const unique = [...new Set(onnxFiles)];
   if (unique.length === 1) {
     return unique[0];
   }
   if (unique.length > 1) {
-    throw new Error(`Multiple ONNX files found: ${unique.join(", ")}. Set PAKSHI_MODEL_PATH explicitly.`);
+    throw new Error(`Multiple EffNet ONNX files found: ${unique.join(", ")}. Set PAKSHI_MODEL_PATH explicitly.`);
   }
   throw new Error("No EffNet-Bio ONNX found. Add one or set PAKSHI_MODEL_PATH explicitly.");
 }
 
+function resolvePitchModel(repoRoot) {
+  if (process.env.PAKSHI_PITCH_MODEL_PATH && fs.existsSync(process.env.PAKSHI_PITCH_MODEL_PATH)) {
+    return process.env.PAKSHI_PITCH_MODEL_PATH;
+  }
+  const candidates = [
+    path.join(repoRoot, "crepe_pitch.onnx"),
+    path.join(repoRoot, "crepe_pitch_frames.onnx"),
+    path.join(process.env.HOME || "", "Downloads", "trained_models", "crepe_pitch.onnx"),
+    path.join(process.env.HOME || "", "Downloads", "trained_models", "crepe_pitch_frames.onnx"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error("No CREPE pitch ONNX found. Add crepe_pitch.onnx to the repo root or set PAKSHI_PITCH_MODEL_PATH explicitly.");
+}
+
 function sendToWorker(payload) {
   if (!worker || worker.killed) {
+    emitWorkerEvent({
+      type: "error",
+      message: "worker is not running; check startup errors and ensure the CREPE pitch model exists",
+    });
     return;
   }
   worker.stdin.write(JSON.stringify(payload) + "\n");
@@ -77,10 +102,12 @@ function startWorker() {
   const repoRoot = path.resolve(__dirname, "..");
   const python = resolvePython(repoRoot);
   const model = resolveModel(repoRoot);
+  const pitchModel = resolvePitchModel(repoRoot);
   const bundle = process.env.PAKSHI_BUNDLE_PATH || path.join(repoRoot, "pakshi_bundle_effnet_bio");
   const args = [path.join(repoRoot, "pakshi_worker.py"), "--model", model];
+  args.push("--pitch-model", pitchModel);
   args.push("--bundle", bundle);
-  workerPaths = { python, model, bundle };
+  workerPaths = { python, model, pitchModel, bundle };
   workerStderrTail = "";
 
   worker = spawn(python, args, {
@@ -136,12 +163,18 @@ function startWorker() {
 
 app.whenReady().then(() => {
   createWindow();
-  startWorker();
-
   ipcMain.handle("worker-command", async (_, payload) => {
     sendToWorker(payload);
     return { ok: true };
   });
+  try {
+    startWorker();
+  } catch (error) {
+    emitWorkerEvent({
+      type: "error",
+      message: String(error.message || error),
+    });
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

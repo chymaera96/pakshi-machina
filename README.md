@@ -1,13 +1,13 @@
 # Pakshi Machina
 
 ## Overview
-Pakshi Machina listens for a sung phrase, detects onset timings inside it, embeds each onset-driven window, and plays back matching bird vocalisations at the same rhythmic offsets.
+Pakshi Machina listens for a sung phrase, detects pitch-change boundaries inside it, embeds each pitch-driven window, and plays back matching bird vocalisations at the same rhythmic offsets.
 
 This branch is `effnet_bio`-only.
 
 - Query window: `0.25 s`
 - Live/runtime sample rate: `16 kHz`
-- Onset analysis sample rate: `16 kHz`
+- Pitch analysis sample rate: `16 kHz`
 - Embedding model: `effnet_bio_zf_emb1024.onnx`
 - Embedding output: `1024`-dim L2-normalized vector
 
@@ -70,6 +70,7 @@ Electron defaults to:
 You can override them with:
 
 - `PAKSHI_MODEL_PATH`
+- `PAKSHI_PITCH_MODEL_PATH`
 - `PAKSHI_BUNDLE_PATH`
 - `PAKSHI_PYTHON_PATH`
 
@@ -78,8 +79,8 @@ You can override them with:
   - `Capture Noise Floor`
   - `Capture Singing Level`
 - Phrase segmentation is still noise-gate driven.
-- Inside each phrase, detected onsets create overlapping or non-overlapping `0.25 s` query windows.
-- Playback keeps the onset timing from the singer’s phrase.
+- Inside each phrase, CREPE pitch changes create overlapping or non-overlapping `0.25 s` query windows.
+- Playback keeps the pitch-segment timing from the singer’s phrase.
 - The mic is muted during playback to prevent recursive self-triggering.
 
 ## Tests

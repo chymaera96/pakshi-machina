@@ -267,7 +267,7 @@ class SegmentMatch:
     metadata: Dict[str, Any]
     start_seconds: float
     end_seconds: float
-    onset_seconds: float
+    segment_start_seconds: float
     scheduled_offset_seconds: float
 
 
@@ -288,7 +288,7 @@ class RetrievalSequence:
                     "corpus_index": m.corpus_index,
                     "start_seconds": m.start_seconds,
                     "end_seconds": m.end_seconds,
-                    "onset_seconds": m.onset_seconds,
+                    "segment_start_seconds": m.segment_start_seconds,
                     "scheduled_offset_seconds": m.scheduled_offset_seconds,
                     "metadata": m.metadata,
                 }
@@ -331,7 +331,7 @@ class RetrievalEngine:
                     metadata=metadata,
                     start_seconds=seg.start_seconds,
                     end_seconds=seg.end_seconds,
-                    onset_seconds=seg.onset_seconds,
+                    segment_start_seconds=seg.segment_start_seconds,
                     scheduled_offset_seconds=seg.scheduled_offset_seconds,
                 )
             )

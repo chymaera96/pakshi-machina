@@ -11,7 +11,7 @@ class RuntimeConfig:
     pre_roll_seconds: float = 0.15
     gate_open_db: float = -42.0
     gate_close_db: float = -48.0
-    onset_hold_seconds: float = 0.05
+    gate_hold_seconds: float = 0.05
     release_seconds: float = 0.2
     min_phrase_seconds: float = 0.25
     max_phrase_seconds: float = 12.0
@@ -23,15 +23,17 @@ class RuntimeConfig:
     calibration_noise_seconds: float = 2.5
     calibration_singing_seconds: float = 8.0
     calibration_min_separation_db: float = 8.0
-    onset_sample_rate: int = 16000
-    onset_method: str = "hfc"
-    onset_window_size: int = 1024
-    onset_hop_size: int = 256
-    onset_min_interval_seconds: float = 0.07
-    onset_threshold: float = 0.12
-    onset_silence_db: float = -75.0
-    save_onset_debug_plots: bool = True
-    onset_debug_dir: str = "debug/onsets"
+    pitch_sample_rate: int = 16000
+    pitch_change_threshold_cents: float = 100.0
+    pitch_confidence_floor: float = 0.5
+    pitch_stable_hold_seconds: float = 0.06
+    pitch_ignore_short_gaps: bool = True
+    pitch_short_gap_seconds: float = 0.05
+    pitch_min_segment_spacing_seconds: float = 0.12
+    pitch_phrase_end_guard_seconds: float = 0.2
+    pitch_frame_batch_size: int = 512
+    save_pitch_debug_plots: bool = True
+    pitch_debug_dir: str = "debug/pitch"
     embedding_batch_size: int = 32
     embedding_live_max_batch_size: int = 16
 
@@ -44,8 +46,8 @@ class RuntimeConfig:
     def pre_roll_samples(self) -> int:
         return int(round(self.pre_roll_seconds * self.sample_rate))
 
-    def onset_hold_samples(self) -> int:
-        return int(round(self.onset_hold_seconds * self.sample_rate))
+    def gate_hold_samples(self) -> int:
+        return int(round(self.gate_hold_seconds * self.sample_rate))
 
     def release_samples(self) -> int:
         return int(round(self.release_seconds * self.sample_rate))
