@@ -4,7 +4,7 @@ from .onsets import detect_onset_offsets
 from .retrieval import (
     FaissFlatL2Index,
     NumpyFlatL2Index,
-    OnnxEmbeddingModel,
+    EffNetBioEmbeddingModel,
     RetrievalEngine,
     normalize_rows,
 )
@@ -15,7 +15,7 @@ __all__ = [
     "CorpusBundle",
     "FaissFlatL2Index",
     "NumpyFlatL2Index",
-    "OnnxEmbeddingModel",
+    "EffNetBioEmbeddingModel",
     "PhraseSegmenter",
     "RetrievalEngine",
     "RuntimeConfig",

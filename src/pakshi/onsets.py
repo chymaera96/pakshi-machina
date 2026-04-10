@@ -90,6 +90,47 @@ def _descriptor_from_method(wav: np.ndarray, sr: int, config: RuntimeConfig) -> 
     return env
 
 
+def _pick_onset_peaks(env: np.ndarray, config: RuntimeConfig) -> List[int]:
+    if env.size == 0:
+        return []
+
+    threshold = float(config.onset_threshold)
+    hop = int(config.onset_hop_size)
+    wait = max(1, int(round(float(config.onset_min_interval_seconds) * float(config.onset_sample_rate) / float(hop))))
+
+    candidates: List[int] = []
+    for idx, value in enumerate(env):
+        if value < threshold:
+            continue
+        left = env[idx - 1] if idx > 0 else -np.inf
+        right = env[idx + 1] if idx + 1 < env.size else -np.inf
+        if value >= left and value >= right and (value > left or value > right):
+            candidates.append(idx)
+
+    if not candidates:
+        return []
+
+    selected: List[int] = []
+    for idx in candidates:
+        if not selected:
+            selected.append(idx)
+            continue
+        if idx - selected[-1] >= wait:
+            selected.append(idx)
+            continue
+        prev_idx = selected[-1]
+        valley = float(np.min(env[prev_idx : idx + 1]))
+        prev_val = float(env[prev_idx])
+        curr_val = float(env[idx])
+        separated_by_valley = valley <= threshold or valley <= min(prev_val, curr_val) * 0.6
+        if separated_by_valley:
+            selected.append(idx)
+            continue
+        if curr_val > prev_val:
+            selected[-1] = idx
+    return selected
+
+
 def analyze_onsets(waveform: Sequence[float] | np.ndarray, sample_rate: int, config: RuntimeConfig) -> OnsetAnalysis:
     wav = _prepare_waveform(waveform, sample_rate, config.onset_sample_rate)
     if wav.size == 0:
@@ -105,19 +146,10 @@ def analyze_onsets(waveform: Sequence[float] | np.ndarray, sample_rate: int, con
     if env.size == 0:
         return OnsetAnalysis([0.0], times, [], float(config.onset_threshold), float(config.onset_silence_db), config.onset_method)
 
-    wait = max(1, int(round(float(config.onset_min_interval_seconds) * float(config.onset_sample_rate) / float(hop))))
-    peaks = librosa.util.peak_pick(
-        env,
-        pre_max=1,
-        post_max=1,
-        pre_avg=3,
-        post_avg=3,
-        delta=float(config.onset_threshold),
-        wait=wait,
-    )
-    onset_offsets = (peaks.astype(np.float32) * float(hop) / float(config.onset_sample_rate)).tolist()
-    if not onset_offsets:
-        onset_offsets = [0.0]
+    peak_indices = _pick_onset_peaks(env, config)
+    onset_offsets = [float(idx) * float(hop) / float(config.onset_sample_rate) for idx in peak_indices]
+    if not onset_offsets or onset_offsets[0] > 1e-6:
+        onset_offsets = [0.0] + onset_offsets
 
     return OnsetAnalysis(
         onset_offsets_seconds=[max(0.0, float(v)) for v in onset_offsets],

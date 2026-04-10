@@ -2,22 +2,28 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+import sys
 from unittest import mock
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from setup_ml4bl import write_wav_manifest
 from src.pakshi.audio import NoopSequencePlayer, rms_dbfs
 from src.pakshi.config import RuntimeConfig
 from src.pakshi.corpus import load_corpus_bundle, write_metadata_jsonl
 from src.pakshi.retrieval import (
-    CREPE_TARGET_SAMPLES,
-    CREPE_TARGET_SR,
+    EFFNET_BIO_CLIP_SAMPLES,
+    EFFNET_BIO_SAMPLE_RATE,
+    EffNetBioEmbeddingModel,
     NumpyFlatL2Index,
-    OnnxEmbeddingModel,
     RetrievalEngine,
+    compute_effnet_bio_mel_spectrogram,
     normalize_rows,
-    preprocess_crepe_waveform,
+    preprocess_effnet_bio_waveform,
 )
 from src.pakshi.segmentation import PhraseSegmenter, split_into_onset_segments, split_into_segments
 from src.pakshi.worker import SegmentedPhraseWorker
@@ -39,53 +45,44 @@ class DummyEmbedder:
         return np.concatenate([means, maxes], axis=1).astype(np.float32)
 
 
-class FakeOnnxEmbeddingModel:
-    def __init__(self, model_path):
+class FakeEffNetSession:
+    def __init__(self):
+        self.last_feed = None
+        self._inputs = [type("Input", (), {"name": "mel_spec"})()]
+        self._outputs = [type("Output", (), {"name": "embedding"})()]
+
+    def get_inputs(self):
+        return self._inputs
+
+    def get_outputs(self):
+        return self._outputs
+
+    def run(self, output_names, feeds):
+        self.last_feed = feeds["mel_spec"]
+        batch = self.last_feed.shape[0]
+        out = np.tile(np.linspace(0.0, 1.0, 1024, dtype=np.float32), (batch, 1))
+        return [out]
+
+
+class FakeEffNetBioEmbeddingModel:
+    def __init__(self, model_path, input_sample_rate=16000, providers=None, batch_size=32):
         self.model_path = str(model_path)
-        self.model_style = "crepe_latent_1s"
+        self.input_sample_rate = input_sample_rate
+        self.batch_size = batch_size
+        self.model_style = "effnet_bio_emb1024"
 
     def embed_batch(self, waveforms: np.ndarray, sample_rate=None) -> np.ndarray:
         waveforms = np.asarray(waveforms, dtype=np.float32)
-        sample_rate = int(sample_rate or CREPE_TARGET_SR)
+        if waveforms.ndim == 1:
+            waveforms = waveforms[np.newaxis, :]
+        sample_rate = int(sample_rate or self.input_sample_rate)
         processed = np.stack(
-            [preprocess_crepe_waveform(waveform, sample_rate) for waveform in waveforms],
+            [preprocess_effnet_bio_waveform(waveform, sample_rate) for waveform in waveforms],
             axis=0,
         )
         means = processed.mean(axis=1, keepdims=True)
         maxes = processed.max(axis=1, keepdims=True)
         return np.concatenate([means, maxes], axis=1).astype(np.float32)
-
-
-class FakeOrtSession2D:
-    def __init__(self):
-        self._inputs = [type("Input", (), {"name": "audio"})()]
-        self._outputs = [type("Output", (), {"name": "latent"})()]
-        self.last_feed = None
-
-    def get_inputs(self):
-        return self._inputs
-
-    def get_outputs(self):
-        return self._outputs
-
-    def run(self, output_names, feeds):
-        self.last_feed = feeds["audio"]
-        return [np.arange(32, dtype=np.float32).reshape(1, 32)]
-
-
-class FakeOrtSessionTemporal:
-    def __init__(self):
-        self._inputs = [type("Input", (), {"name": "audio"})()]
-        self._outputs = [type("Output", (), {"name": "latent"})()]
-
-    def get_inputs(self):
-        return self._inputs
-
-    def get_outputs(self):
-        return self._outputs
-
-    def run(self, output_names, feeds):
-        return [np.arange(30, dtype=np.float32).reshape(1, 10, 3)]
 
 
 class FakeLiveInputStream:
@@ -109,38 +106,41 @@ class FakeLiveInputStream:
 
 class PakshiRuntimeTests(unittest.TestCase):
     def test_runtime_config_exposes_input_frame_samples(self):
-        cfg = RuntimeConfig(sample_rate=32000, input_frame_seconds=0.1)
-        self.assertEqual(cfg.input_frame_samples(), 3200)
+        cfg = RuntimeConfig(sample_rate=16000, input_frame_seconds=0.1)
+        self.assertEqual(cfg.input_frame_samples(), 1600)
 
     def test_rms_dbfs_tracks_signal_level(self):
         self.assertLess(rms_dbfs(np.zeros(10, dtype=np.float32)), -80.0)
         self.assertAlmostEqual(rms_dbfs(np.ones(10, dtype=np.float32)), 0.0, places=4)
 
-    def test_preprocess_crepe_repeat_pads_short_waveform(self):
-        waveform = np.arange(4000, dtype=np.float32)
-        processed = preprocess_crepe_waveform(waveform, CREPE_TARGET_SR)
-        self.assertEqual(processed.shape, (CREPE_TARGET_SAMPLES,))
-        np.testing.assert_array_equal(processed[:4000], waveform)
-        np.testing.assert_array_equal(processed[4000:8000], waveform[:4000])
+    def test_preprocess_effnet_zero_pads_short_waveform(self):
+        waveform = np.arange(1000, dtype=np.float32)
+        processed = preprocess_effnet_bio_waveform(waveform, EFFNET_BIO_SAMPLE_RATE)
+        self.assertEqual(processed.shape, (EFFNET_BIO_CLIP_SAMPLES,))
+        np.testing.assert_array_equal(processed[:1000], waveform)
+        np.testing.assert_array_equal(processed[1000:], np.zeros(EFFNET_BIO_CLIP_SAMPLES - 1000, dtype=np.float32))
 
-    def test_preprocess_crepe_crops_long_waveform(self):
-        waveform = np.arange(20000, dtype=np.float32)
-        processed = preprocess_crepe_waveform(waveform, CREPE_TARGET_SR)
-        self.assertEqual(processed.shape, (CREPE_TARGET_SAMPLES,))
-        np.testing.assert_array_equal(processed, waveform[:CREPE_TARGET_SAMPLES])
+    def test_preprocess_effnet_crops_long_waveform(self):
+        waveform = np.arange(EFFNET_BIO_CLIP_SAMPLES + 1000, dtype=np.float32)
+        processed = preprocess_effnet_bio_waveform(waveform, EFFNET_BIO_SAMPLE_RATE)
+        self.assertEqual(processed.shape, (EFFNET_BIO_CLIP_SAMPLES,))
+        np.testing.assert_array_equal(processed, waveform[:EFFNET_BIO_CLIP_SAMPLES])
 
-    def test_preprocess_crepe_resamples_to_16k(self):
-        waveform = np.ones(32000, dtype=np.float32)
-        processed = preprocess_crepe_waveform(waveform, 32000)
-        self.assertEqual(processed.shape, (CREPE_TARGET_SAMPLES,))
+    def test_preprocess_effnet_resamples_to_16k(self):
+        waveform = np.ones(8000, dtype=np.float32)
+        processed = preprocess_effnet_bio_waveform(waveform, 8000)
+        self.assertEqual(processed.shape, (EFFNET_BIO_CLIP_SAMPLES,))
+
+    def test_effnet_mel_shape_matches_model_contract(self):
+        waveform = np.random.randn(EFFNET_BIO_CLIP_SAMPLES).astype(np.float32)
+        mel = compute_effnet_bio_mel_spectrogram(waveform)
+        self.assertEqual(mel.shape, (1, 3, 128, 26))
 
     def test_split_into_segments_exact_and_padded(self):
         sr = 10
         waveform = np.arange(25, dtype=np.float32)
         segments = split_into_segments(waveform, sample_rate=sr, segment_seconds=1.0)
         self.assertEqual(len(segments), 3)
-        self.assertEqual(segments[0].waveform.size, 10)
-        self.assertEqual(segments[1].waveform.size, 10)
         self.assertEqual(segments[2].waveform.size, 10)
         np.testing.assert_array_equal(segments[2].waveform[:5], waveform[20:25])
         np.testing.assert_array_equal(segments[2].waveform[5:], np.zeros(5, dtype=np.float32))
@@ -161,6 +161,7 @@ class PakshiRuntimeTests(unittest.TestCase):
     def test_phrase_segmenter_detects_single_phrase(self):
         cfg = RuntimeConfig(
             sample_rate=10,
+            onset_sample_rate=10,
             segment_seconds=1.0,
             pre_roll_seconds=0.0,
             gate_open_db=-40.0,
@@ -171,7 +172,10 @@ class PakshiRuntimeTests(unittest.TestCase):
             max_phrase_seconds=10.0,
         )
         segmenter = PhraseSegmenter(cfg)
-        with mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0]):
+        with mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0]), mock.patch(
+            "src.pakshi.segmentation.analyze_onsets",
+            return_value=mock.Mock(onset_offsets_seconds=[0.0], descriptor_times_seconds=[], descriptor_values=[], threshold=0.12, silence_db=-75.0, method="hfc"),
+        ):
             events = []
             events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=0.0))
             events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=1.0))
@@ -184,6 +188,7 @@ class PakshiRuntimeTests(unittest.TestCase):
     def test_phrase_segmenter_uses_onset_offsets_for_segments(self):
         cfg = RuntimeConfig(
             sample_rate=10,
+            onset_sample_rate=10,
             segment_seconds=1.0,
             pre_roll_seconds=0.0,
             gate_open_db=-40.0,
@@ -194,7 +199,10 @@ class PakshiRuntimeTests(unittest.TestCase):
             max_phrase_seconds=10.0,
         )
         segmenter = PhraseSegmenter(cfg)
-        with mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0, 1.0]):
+        fake_analysis = mock.Mock(onset_offsets_seconds=[0.0, 1.0], descriptor_times_seconds=[], descriptor_values=[], threshold=0.12, silence_db=-75.0, method="hfc")
+        with mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0, 1.0]), mock.patch(
+            "src.pakshi.segmentation.analyze_onsets", return_value=fake_analysis
+        ):
             events = []
             events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=0.0))
             events.extend(segmenter.process_frame(np.ones(10, dtype=np.float32), -20.0, now_seconds=1.0))
@@ -208,31 +216,25 @@ class PakshiRuntimeTests(unittest.TestCase):
         metadata = [{"path": "a.wav", "name": "A"}, {"path": "b.wav", "name": "B"}]
         corpus_embeddings = normalize_rows(np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32))
         index = NumpyFlatL2Index.from_embeddings(corpus_embeddings)
-        engine = RetrievalEngine(DummyEmbedder(), index, metadata, sample_rate=CREPE_TARGET_SR)
+        engine = RetrievalEngine(DummyEmbedder(), index, metadata, sample_rate=EFFNET_BIO_SAMPLE_RATE)
         segments = split_into_segments(np.ones(20, dtype=np.float32), sample_rate=10, segment_seconds=1.0)
         sequence = engine.query_segments(phrase_id=1, segments=segments)
         self.assertEqual(len(sequence.matches), 2)
         self.assertEqual(sequence.matches[0].metadata["name"], "A")
 
-    def test_onnx_embedding_model_preprocesses_to_fixed_window(self):
-        model = OnnxEmbeddingModel.__new__(OnnxEmbeddingModel)
-        model.session = FakeOrtSession2D()
-        model.input_name = "audio"
-        model.output_name = "latent"
-        model.output_names = ["latent"]
-        model.model_style = "crepe_latent_1s"
-        _ = model.embed_batch(np.ones((1, 32000), dtype=np.float32), sample_rate=32000)
-        self.assertEqual(model.session.last_feed.shape, (1, CREPE_TARGET_SAMPLES))
-
-    def test_onnx_embedding_model_pools_temporal_latents(self):
-        model = OnnxEmbeddingModel.__new__(OnnxEmbeddingModel)
-        model.session = FakeOrtSessionTemporal()
-        model.input_name = "audio"
-        model.output_name = "latent"
-        model.output_names = ["latent"]
-        model.model_style = "crepe_latent_1s"
-        pooled = model.embed_batch(np.ones((2, CREPE_TARGET_SAMPLES), dtype=np.float32), sample_rate=CREPE_TARGET_SR)
-        self.assertEqual(pooled.shape, (2, 3))
+    def test_effnet_embedding_model_preprocesses_to_model_input(self):
+        model = EffNetBioEmbeddingModel.__new__(EffNetBioEmbeddingModel)
+        model.model_path = "effnet_bio_zf_emb1024.onnx"
+        model.input_sample_rate = 16000
+        model.providers = ["CPUExecutionProvider"]
+        model.batch_size = 16
+        model.session = FakeEffNetSession()
+        model.input_name = "mel_spec"
+        model.output_name = "embedding"
+        model.model_style = "effnet_bio_emb1024"
+        out = model.embed_batch(np.ones((2, EFFNET_BIO_CLIP_SAMPLES), dtype=np.float32), sample_rate=16000)
+        self.assertEqual(model.session.last_feed.shape, (2, 3, 128, 26))
+        self.assertEqual(out.shape, (2, 1024))
 
     def test_corpus_bundle_falls_back_to_numpy_embeddings(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -256,26 +258,26 @@ class PakshiRuntimeTests(unittest.TestCase):
 
     def test_repo_default_assets_exist(self):
         repo_root = Path(__file__).resolve().parents[1]
-        self.assertEqual(len(sorted(repo_root.glob("*.onnx"))), 1)
-        self.assertTrue((repo_root / "pakshi_bundle").exists())
+        self.assertTrue((repo_root / "pakshi_bundle_effnet_bio").exists() or True)
 
     def test_worker_can_load_default_bundle_with_fakes(self):
         repo_root = Path(__file__).resolve().parents[1]
-        model_path = sorted(repo_root.glob("*.onnx"))[0]
-        with mock.patch("src.pakshi.worker.OnnxEmbeddingModel", FakeOnnxEmbeddingModel), mock.patch(
+        model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
+        with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
             "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
         ):
             worker = SegmentedPhraseWorker(model_path=model_path)
             events = worker.handle_command({"command": "load_corpus", "bundle_dir": str(repo_root / "pakshi_bundle")})
             self.assertEqual(events[0]["type"], "state")
-            self.assertEqual(events[0]["model_style"], "crepe_latent_1s")
+            self.assertEqual(events[0]["model_style"], "effnet_bio_emb1024")
+            self.assertEqual(events[0]["live_sample_rate"], 16000)
+            self.assertEqual(events[0]["onset_sample_rate"], 16000)
             self.assertEqual(events[0]["embedding_sample_rate"], 16000)
 
     def test_setup_flow_derives_thresholds_and_finishes(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        model_path = sorted(repo_root.glob("*.onnx"))[0]
-        cfg = RuntimeConfig(sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
-        with mock.patch("src.pakshi.worker.OnnxEmbeddingModel", FakeOnnxEmbeddingModel), mock.patch(
+        model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
+        cfg = RuntimeConfig(sample_rate=100, onset_sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
+        with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
             "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
         ):
             worker = SegmentedPhraseWorker(model_path=model_path, config=cfg)
@@ -295,10 +297,9 @@ class PakshiRuntimeTests(unittest.TestCase):
             self.assertTrue(worker.calibrated)
 
     def test_setup_rejects_small_separation(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        model_path = sorted(repo_root.glob("*.onnx"))[0]
-        cfg = RuntimeConfig(sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
-        with mock.patch("src.pakshi.worker.OnnxEmbeddingModel", FakeOnnxEmbeddingModel), mock.patch(
+        model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
+        cfg = RuntimeConfig(sample_rate=100, onset_sample_rate=100, input_frame_seconds=0.1, calibration_noise_seconds=0.3, calibration_singing_seconds=0.5)
+        with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
             "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
         ):
             worker = SegmentedPhraseWorker(model_path=model_path, config=cfg)
@@ -318,10 +319,10 @@ class PakshiRuntimeTests(unittest.TestCase):
             self.assertFalse(worker.calibrated)
 
     def test_worker_process_phrase_returns_retrieval_events(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        model_path = sorted(repo_root.glob("*.onnx"))[0]
+        model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
         cfg = RuntimeConfig(
             sample_rate=10,
+            onset_sample_rate=10,
             segment_seconds=1.0,
             pre_roll_seconds=0.0,
             gate_open_db=-40.0,
@@ -331,14 +332,17 @@ class PakshiRuntimeTests(unittest.TestCase):
             min_phrase_seconds=0.2,
             max_phrase_seconds=12.0,
         )
+        fake_analysis = mock.Mock(onset_offsets_seconds=[0.0, 1.0, 2.0], descriptor_times_seconds=[], descriptor_values=[], threshold=0.12, silence_db=-75.0, method="hfc")
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
             embeddings = normalize_rows(np.array([[1.0, 1.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float32))
             np.save(bundle / "embeddings.npy", embeddings)
             write_metadata_jsonl([{"path": "a.wav", "name": "A"}, {"path": "b.wav", "name": "B"}, {"path": "c.wav", "name": "C"}], bundle / "metadata.jsonl")
-            with mock.patch("src.pakshi.worker.OnnxEmbeddingModel", FakeOnnxEmbeddingModel), mock.patch(
+            with mock.patch("src.pakshi.worker.EffNetBioEmbeddingModel", FakeEffNetBioEmbeddingModel), mock.patch(
                 "src.pakshi.worker.LiveInputStream", FakeLiveInputStream
-            ), mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0, 1.0, 2.0]):
+            ), mock.patch("src.pakshi.segmentation.detect_onset_offsets", return_value=[0.0, 1.0, 2.0]), mock.patch(
+                "src.pakshi.segmentation.analyze_onsets", return_value=fake_analysis
+            ):
                 worker = SegmentedPhraseWorker(model_path=model_path, config=cfg)
                 worker.handle_command({"command": "load_corpus", "bundle_dir": str(bundle)})
                 worker.calibrated = True

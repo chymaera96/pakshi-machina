@@ -30,24 +30,28 @@ function resolvePython(repoRoot) {
 }
 
 function resolveModel(repoRoot) {
-  if (process.env.PAKSHI_MODEL_PATH) {
-    if (fs.existsSync(process.env.PAKSHI_MODEL_PATH)) {
-      return process.env.PAKSHI_MODEL_PATH;
-    }
+  const candidates = [];
+  if (process.env.PAKSHI_MODEL_PATH && fs.existsSync(process.env.PAKSHI_MODEL_PATH)) {
+    return process.env.PAKSHI_MODEL_PATH;
+  }
+  const downloadsEffnetBio = path.join(process.env.HOME || "", "Downloads", "trained_models", "effnet_bio", "effnet_bio_zf_emb1024.onnx");
+  if (fs.existsSync(downloadsEffnetBio)) {
+    return downloadsEffnetBio;
   }
   const onnxFiles = fs
     .readdirSync(repoRoot)
     .filter((name) => name.toLowerCase().endsWith(".onnx"))
-    .sort();
-  if (onnxFiles.length === 1) {
-    return path.join(repoRoot, onnxFiles[0]);
+    .sort()
+    .map((name) => path.join(repoRoot, name));
+  candidates.push(...onnxFiles);
+  const unique = [...new Set(candidates)];
+  if (unique.length === 1) {
+    return unique[0];
   }
-  if (onnxFiles.length > 1) {
-    throw new Error(
-      `Multiple ONNX files found in repo root: ${onnxFiles.join(", ")}. Set PAKSHI_MODEL_PATH explicitly.`
-    );
+  if (unique.length > 1) {
+    throw new Error(`Multiple ONNX files found: ${unique.join(", ")}. Set PAKSHI_MODEL_PATH explicitly.`);
   }
-  throw new Error("No ONNX file found in repo root. Add one or set PAKSHI_MODEL_PATH explicitly.");
+  throw new Error("No EffNet-Bio ONNX found. Add one or set PAKSHI_MODEL_PATH explicitly.");
 }
 
 function sendToWorker(payload) {
@@ -73,7 +77,7 @@ function startWorker() {
   const repoRoot = path.resolve(__dirname, "..");
   const python = resolvePython(repoRoot);
   const model = resolveModel(repoRoot);
-  const bundle = process.env.PAKSHI_BUNDLE_PATH || path.join(repoRoot, "pakshi_bundle");
+  const bundle = process.env.PAKSHI_BUNDLE_PATH || path.join(repoRoot, "pakshi_bundle_effnet_bio");
   const args = [path.join(repoRoot, "pakshi_worker.py"), "--model", model];
   args.push("--bundle", bundle);
   workerPaths = { python, model, bundle };

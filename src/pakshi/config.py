@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 @dataclass
 class RuntimeConfig:
-    sample_rate: int = 32000
+    sample_rate: int = 16000
     input_frame_seconds: float = 0.1
-    segment_seconds: float = 0.5
+    segment_seconds: float = 0.25
     pre_roll_seconds: float = 0.15
     gate_open_db: float = -42.0
     gate_close_db: float = -48.0
@@ -32,6 +32,8 @@ class RuntimeConfig:
     onset_silence_db: float = -75.0
     save_onset_debug_plots: bool = True
     onset_debug_dir: str = "debug/onsets"
+    embedding_batch_size: int = 32
+    embedding_live_max_batch_size: int = 16
 
     def segment_samples(self) -> int:
         return int(round(self.segment_seconds * self.sample_rate))

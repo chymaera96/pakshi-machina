@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
@@ -21,8 +20,12 @@ except Exception:  # pragma: no cover
     ort = None
 
 
-CREPE_TARGET_SR = 16000
-CREPE_TARGET_SAMPLES = 16000
+EFFNET_BIO_SAMPLE_RATE = 16_000
+EFFNET_BIO_CLIP_SAMPLES = 4_000
+EFFNET_BIO_N_FFT = 800
+EFFNET_BIO_HOP_LENGTH = 160
+EFFNET_BIO_WIN_LENGTH = 800
+EFFNET_BIO_N_MELS = 128
 
 
 def normalize_rows(vectors: np.ndarray) -> np.ndarray:
@@ -32,6 +35,20 @@ def normalize_rows(vectors: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(arr, axis=1, keepdims=True)
     norms = np.maximum(norms, 1e-12)
     return arr / norms
+
+
+def load_metadata(path: str | Path) -> List[Dict[str, Any]]:
+    metadata_path = Path(path)
+    if metadata_path.suffix == ".jsonl":
+        rows: List[Dict[str, Any]] = []
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    rows.append(__import__("json").loads(line))
+        return rows
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        return list(__import__("json").load(handle))
 
 
 def _resample_waveform(waveform: np.ndarray, source_sr: int, target_sr: int) -> np.ndarray:
@@ -45,12 +62,12 @@ def _resample_waveform(waveform: np.ndarray, source_sr: int, target_sr: int) -> 
     return np.interp(target_x, source_x, waveform).astype(np.float32)
 
 
-def preprocess_crepe_waveform(
+def preprocess_effnet_bio_waveform(
     waveform: np.ndarray,
     sample_rate: int,
     *,
-    target_sr: int = CREPE_TARGET_SR,
-    target_samples: int = CREPE_TARGET_SAMPLES,
+    target_sr: int = EFFNET_BIO_SAMPLE_RATE,
+    target_samples: int = EFFNET_BIO_CLIP_SAMPLES,
 ) -> np.ndarray:
     wav = np.asarray(waveform, dtype=np.float32)
     if wav.ndim == 2:
@@ -61,11 +78,67 @@ def preprocess_crepe_waveform(
     if wav.size == 0:
         return np.zeros(target_samples, dtype=np.float32)
     if wav.size < target_samples:
-        reps = target_samples // wav.size + 1
-        wav = np.tile(wav, reps)[:target_samples]
-    else:
-        wav = wav[:target_samples]
-    return wav.astype(np.float32, copy=False)
+        padded = np.zeros(target_samples, dtype=np.float32)
+        padded[: wav.size] = wav
+        return padded
+    return wav[:target_samples].astype(np.float32, copy=False)
+
+
+def _hann_window(length: int) -> np.ndarray:
+    return (0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(length) / length))).astype(np.float32)
+
+
+def _mel_filterbank(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
+    fmin, fmax = 0.0, sr / 2.0
+    mel_min = 2595.0 * np.log10(1.0 + fmin / 700.0)
+    mel_max = 2595.0 * np.log10(1.0 + fmax / 700.0)
+    mels = np.linspace(mel_min, mel_max, n_mels + 2)
+    freqs = 700.0 * (10.0 ** (mels / 2595.0) - 1.0)
+    bins = np.floor((n_fft + 1) * freqs / sr).astype(int)
+
+    fb = np.zeros((n_mels, n_fft // 2 + 1), dtype=np.float32)
+    for i in range(n_mels):
+        lo, mid, hi = bins[i], bins[i + 1], bins[i + 2]
+        for j in range(lo, mid):
+            fb[i, j] = (j - lo) / max(mid - lo, 1)
+        for j in range(mid, hi):
+            fb[i, j] = (hi - j) / max(hi - mid, 1)
+    return fb
+
+
+_EFFNET_WINDOW = _hann_window(EFFNET_BIO_WIN_LENGTH)
+_EFFNET_MEL_FB = _mel_filterbank(EFFNET_BIO_SAMPLE_RATE, EFFNET_BIO_N_FFT, EFFNET_BIO_N_MELS)
+
+
+def compute_effnet_bio_mel_spectrogram(audio: np.ndarray) -> np.ndarray:
+    arr = np.asarray(audio, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr[np.newaxis, :]
+    batch_size = arr.shape[0]
+    results: List[np.ndarray] = []
+    for i in range(batch_size):
+        wav = arr[i]
+        pad = EFFNET_BIO_N_FFT // 2
+        wav = np.pad(wav, (pad, pad), mode="reflect")
+        n_frames = 1 + (len(wav) - EFFNET_BIO_N_FFT) // EFFNET_BIO_HOP_LENGTH
+        frames = np.stack(
+            [
+                wav[j * EFFNET_BIO_HOP_LENGTH : j * EFFNET_BIO_HOP_LENGTH + EFFNET_BIO_N_FFT]
+                * _EFFNET_WINDOW
+                for j in range(n_frames)
+            ],
+            axis=0,
+        )
+        stft = np.fft.rfft(frames, n=EFFNET_BIO_N_FFT, axis=1)
+        power = np.abs(stft).astype(np.float32) ** 2
+        mel = _EFFNET_MEL_FB @ power.T
+        mel = np.log(mel + 1e-6)
+        mel_min = mel.min()
+        mel_max = mel.max()
+        mel = (mel - mel_min) / (mel_max - mel_min + 1e-8)
+        mel_3ch = np.stack([mel, mel, mel], axis=0)
+        results.append(mel_3ch.astype(np.float32))
+    return np.stack(results, axis=0).astype(np.float32)
 
 
 class EmbeddingModel(Protocol):
@@ -78,56 +151,63 @@ class SearchIndex(Protocol):
         ...
 
 
-class OnnxEmbeddingModel:
-    def __init__(self, model_path: str | Path, providers: Optional[Sequence[str]] = None):
+class EffNetBioEmbeddingModel:
+    def __init__(
+        self,
+        model_path: str | Path,
+        input_sample_rate: int = RuntimeConfig.sample_rate,
+        providers: Optional[Sequence[str]] = None,
+        *,
+        batch_size: int = RuntimeConfig.embedding_batch_size,
+    ):
         if ort is None:  # pragma: no cover
             raise RuntimeError("onnxruntime is not installed. Add onnxruntime to run the pakshi worker.")
         self.model_path = str(model_path)
+        self.input_sample_rate = int(input_sample_rate)
         self.providers = list(providers) if providers else ["CPUExecutionProvider"]
+        self.batch_size = max(1, int(batch_size))
         self.session = ort.InferenceSession(self.model_path, providers=self.providers)
-        self.input_name = self.session.get_inputs()[0].name
-        self.output_names = [output.name for output in self.session.get_outputs()]
-        self.output_name = self._select_output_name(self.output_names)
-        self.model_style = "crepe_latent_1s"
-        if self.input_name != "audio":
-            raise RuntimeError(f"Expected CREPE input tensor named 'audio', got '{self.input_name}'.")
-
-    def _select_output_name(self, output_names: Sequence[str]) -> str:
-        lowered = {name.lower(): name for name in output_names}
-        for candidate in ["latent", "embedding", "penultimate", "features"]:
-            if candidate in lowered:
-                return lowered[candidate]
-        return output_names[0]
+        input_meta = self.session.get_inputs()[0]
+        self.input_name = input_meta.name
+        self.output_name = self.session.get_outputs()[0].name
+        self.model_style = "effnet_bio_emb1024"
+        input_shape = list(input_meta.shape)
+        self._fixed_batch_size = None
+        if input_shape and isinstance(input_shape[0], int):
+            self._fixed_batch_size = int(input_shape[0])
+        if self.input_name != "mel_spec":
+            raise RuntimeError(f"Expected model input tensor named 'mel_spec', got '{self.input_name}'.")
 
     def embed_batch(self, waveforms: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
         arr = np.asarray(waveforms, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr[np.newaxis, :]
         if arr.ndim != 2:
             raise ValueError(f"Expected waveform batch of shape [B, T], got {arr.shape}")
-        source_sr = int(sample_rate or RuntimeConfig.sample_rate)
-        batch = np.stack(
-            [preprocess_crepe_waveform(waveform, source_sr) for waveform in arr],
+        source_sr = int(sample_rate or self.input_sample_rate)
+        prepared = np.stack(
+            [preprocess_effnet_bio_waveform(waveform, source_sr) for waveform in arr],
             axis=0,
-        ).astype(np.float32)
-        outputs = [self._embed_single(waveform) for waveform in batch]
-        return np.stack(outputs, axis=0).astype(np.float32)
-
-    def _embed_single(self, waveform: np.ndarray) -> np.ndarray:
-        out = self.session.run([self.output_name], {self.input_name: waveform.reshape(1, -1)})[0]
-        return self._pool_output(out)
-
-    def _pool_output(self, output: np.ndarray) -> np.ndarray:
-        out = np.asarray(output, dtype=np.float32)
-        if out.ndim == 1:
-            return out
-        if out.ndim == 2:
-            if out.shape[0] == 1:
-                return out[0]
-            return out.mean(axis=0)
-        if out.ndim == 3:
-            if out.shape[0] == 1:
-                return out[0].mean(axis=0)
-            return out.mean(axis=(0, 1))
-        raise ValueError(f"Expected 1D, 2D, or 3D CREPE latent output, got shape {out.shape}")
+        )
+        mel = compute_effnet_bio_mel_spectrogram(prepared)
+        fixed_batch_size = getattr(self, "_fixed_batch_size", None)
+        if fixed_batch_size in (None, mel.shape[0]):
+            embeddings = self.session.run([self.output_name], {self.input_name: mel})[0]
+            embeddings = np.asarray(embeddings, dtype=np.float32)
+        elif fixed_batch_size == 1:
+            outputs = []
+            for item in mel:
+                out = self.session.run([self.output_name], {self.input_name: item[np.newaxis, ...]})[0]
+                outputs.append(np.asarray(out[0], dtype=np.float32))
+            embeddings = np.stack(outputs, axis=0)
+        else:
+            raise RuntimeError(
+                f"EffNetBio ONNX expects fixed batch size {fixed_batch_size}, "
+                f"but received batch size {mel.shape[0]}."
+            )
+        if embeddings.ndim != 2:
+            raise ValueError(f"Expected EffNetBio output shape [B, D], got {embeddings.shape}")
+        return embeddings
 
 
 class FaissFlatL2Index:
@@ -256,17 +336,3 @@ class RetrievalEngine:
                 )
             )
         return RetrievalSequence(phrase_id=phrase_id, matches=matches)
-
-
-def load_metadata(path: str | Path) -> List[Dict[str, Any]]:
-    p = Path(path)
-    if p.suffix == ".jsonl":
-        rows: List[Dict[str, Any]] = []
-        with p.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        return rows
-    with p.open("r", encoding="utf-8") as handle:
-        return list(json.load(handle))

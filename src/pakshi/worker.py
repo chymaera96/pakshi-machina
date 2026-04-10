@@ -14,7 +14,7 @@ from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlaye
 from .config import RuntimeConfig
 from .corpus import CorpusBundle, load_corpus_bundle
 from .onsets import save_onset_debug_plot
-from .retrieval import OnnxEmbeddingModel, RetrievalEngine
+from .retrieval import EffNetBioEmbeddingModel, RetrievalEngine
 from .segmentation import PhraseSegmenter, SegmentedPhrase
 
 
@@ -23,7 +23,11 @@ class SegmentedPhraseWorker:
         self.config = config or RuntimeConfig()
         self.model_path = str(model_path)
         self.segmenter = PhraseSegmenter(self.config)
-        self.embedder = OnnxEmbeddingModel(self.model_path)
+        self.embedder = EffNetBioEmbeddingModel(
+            self.model_path,
+            input_sample_rate=self.config.sample_rate,
+            batch_size=self.config.embedding_live_max_batch_size,
+        )
         self.corpus: Optional[CorpusBundle] = None
         self.retrieval: Optional[RetrievalEngine] = None
         self.armed = False
@@ -467,6 +471,8 @@ class SegmentedPhraseWorker:
             "armed": self.armed,
             "calibrated": self.calibrated,
             "model_style": self.embedder.model_style,
+            "live_sample_rate": self.config.sample_rate,
+            "onset_sample_rate": self.config.onset_sample_rate,
             "embedding_sample_rate": 16000,
             "setup_mode": self.setup_mode,
             "setup_stage": self._setup_stage,

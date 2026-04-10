@@ -37,7 +37,7 @@ const STATE_COPY = {
   setup: ["Setup", "Capture room noise, then capture realistic singing."],
   listening: ["Listening", "Microphone hot. Waiting for a sung phrase."],
   in_phrase: ["Recording Phrase", "Phrase detected. Capturing live audio."],
-  processing: ["Retrieving", "Embedding onset-driven segments with CREPE pitch latents and finding nearest neighbours."],
+  processing: ["Retrieving", "Embedding onset-driven segments with EffNet-Bio and finding nearest neighbours."],
   playing_sequence: ["Playing Response", "Retrieved bird sounds are following the singer's onset rhythm."],
 };
 

@@ -10,9 +10,9 @@
     <main class="app-shell">
       <section class="hero">
         <p class="eyebrow">Pakshi Machina</p>
-        <h1>CREPE Pitch-Latent Retrieval</h1>
+        <h1>EffNet-Bio Retrieval</h1>
         <p class="summary">
-          Noise-gated singing phrases are segmented from detected onsets. Each onset launches a 0.5 second CREPE-latent query and bird responses follow the same rhythmic offsets.
+          Noise-gated singing phrases are segmented from detected onsets. Each onset launches a 0.25 second EffNet-Bio query window. Live audio runs at 16 kHz, and each query is embedded directly from a local NumPy mel-spectrogram frontend.
         </p>
       </section>
 
@@ -42,7 +42,7 @@
         <button id="reset-setup" class="secondary">Reset</button>
         <label>
           Bundle directory
-          <input id="bundle-dir" type="text" value="./pakshi_bundle" />
+          <input id="bundle-dir" type="text" value="./pakshi_bundle_effnet_bio" />
         </label>
       </section>
 
@@ -56,7 +56,7 @@
         <button id="reopen-setup" class="secondary">Setup</button>
         <label>
           Bundle directory
-          <input id="bundle-dir-performance" type="text" value="./pakshi_bundle" />
+          <input id="bundle-dir-performance" type="text" value="./pakshi_bundle_effnet_bio" />
         </label>
       </section>
 
@@ -109,7 +109,7 @@
         <article class="panel">
           <h2>Setup</h2>
           <ol id="setup-list"></ol>
-          <p class="microcopy" id="setup-summary">noise -- | soft -- | open -- | close --</p>
+          <p class="microcopy" id="setup-summary">noise -- | soft -- | open -- | close -- | live 16 kHz | onset 16 kHz</p>
         </article>
         <article class="panel">
           <h2>Playback</h2>
