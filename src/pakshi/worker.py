@@ -15,21 +15,42 @@ from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlaye
 from .config import RuntimeConfig
 from .corpus import CorpusBundle, load_corpus_bundle
 from .pitch import CrepePitchTracker, save_pitch_debug_plot
-from .retrieval import EffNetBioEmbeddingModel, RetrievalEngine
+from .retrieval import (
+    MODEL_FAMILIES,
+    create_embedding_model,
+    default_segment_seconds_for_family,
+    describe_backend,
+    infer_model_family,
+    RetrievalEngine,
+)
 from .segmentation import PhraseSegmenter, SegmentedPhrase
 
 
 class SegmentedPhraseWorker:
-    def __init__(self, model_path: str | Path, config: Optional[RuntimeConfig] = None, pitch_model_path: Optional[str | Path] = None):
+    def __init__(
+        self,
+        model_path: str | Path,
+        config: Optional[RuntimeConfig] = None,
+        pitch_model_path: Optional[str | Path] = None,
+        model_family: Optional[str] = None,
+    ):
         self.config = config or RuntimeConfig()
         self.model_path = str(model_path)
+        self.model_family = model_family or infer_model_family(self.model_path)
+        self.config.segment_seconds = default_segment_seconds_for_family(self.model_family)
         self.pitch_model_path = str(pitch_model_path or self.config.__dict__.get("pitch_model_path") or os.environ.get("PAKSHI_PITCH_MODEL_PATH", "crepe_pitch.onnx"))
         self.pitch_tracker = CrepePitchTracker(self.pitch_model_path, frame_batch_size=self.config.pitch_frame_batch_size)
         self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
-        self.embedder = EffNetBioEmbeddingModel(
+        self.embedder = create_embedding_model(
             self.model_path,
+            model_family=self.model_family,
             input_sample_rate=self.config.sample_rate,
             batch_size=self.config.embedding_live_max_batch_size,
+        )
+        self.backend = describe_backend(
+            self.model_path,
+            model_family=self.model_family,
+            input_sample_rate=self.embedder.input_sample_rate,
         )
         self.corpus: Optional[CorpusBundle] = None
         self.retrieval: Optional[RetrievalEngine] = None
@@ -78,8 +99,15 @@ class SegmentedPhraseWorker:
         if kind == "load_corpus":
             bundle_dir = command["bundle_dir"]
             self.corpus = load_corpus_bundle(bundle_dir)
+            self._validate_corpus_compatibility(self.corpus)
             self.retrieval = RetrievalEngine(self.embedder, self.corpus.index, self.corpus.metadata)
             return [self._state_event("idle")]
+        if kind == "set_model_backend":
+            return self._set_model_backend(
+                model_path=command["model_path"],
+                model_family=command.get("model_family"),
+                bundle_dir=command.get("bundle_dir"),
+            )
         if kind == "set_params":
             self._apply_params(command.get("params", {}))
             return [self._state_event(self._last_state)]
@@ -123,12 +151,81 @@ class SegmentedPhraseWorker:
                 setattr(self.config, key, value)
         self.pitch_tracker = CrepePitchTracker(self.pitch_model_path, frame_batch_size=self.config.pitch_frame_batch_size)
         self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
+        self.embedder = create_embedding_model(
+            self.model_path,
+            model_family=self.model_family,
+            input_sample_rate=self.config.sample_rate,
+            batch_size=self.config.embedding_live_max_batch_size,
+        )
+        self.backend = describe_backend(
+            self.model_path,
+            model_family=self.model_family,
+            input_sample_rate=self.embedder.input_sample_rate,
+        )
+        if self.corpus is not None:
+            self._validate_corpus_compatibility(self.corpus)
+            self.retrieval = RetrievalEngine(self.embedder, self.corpus.index, self.corpus.metadata)
         self._player = self._build_player()
         self._smoothed_level_db = self.config.meter_floor_db
         self._level_estimator = build_level_estimator()
         if self.armed or self._setup_stage in {"capture_noise", "capture_singing"}:
             self._stop_mic()
             self._start_mic()
+
+    def _set_model_backend(
+        self,
+        *,
+        model_path: str | Path,
+        model_family: Optional[str] = None,
+        bundle_dir: Optional[str | Path] = None,
+    ) -> List[Dict[str, Any]]:
+        was_mic_active = self._mic is not None and self._mic.active
+        self._player.clear()
+        if was_mic_active:
+            self._stop_mic()
+
+        self.model_path = str(model_path)
+        self.model_family = model_family or infer_model_family(self.model_path)
+        self.config.segment_seconds = default_segment_seconds_for_family(self.model_family)
+        self.embedder = create_embedding_model(
+            self.model_path,
+            model_family=self.model_family,
+            input_sample_rate=self.config.sample_rate,
+            batch_size=self.config.embedding_live_max_batch_size,
+        )
+        self.backend = describe_backend(
+            self.model_path,
+            model_family=self.model_family,
+            input_sample_rate=self.embedder.input_sample_rate,
+        )
+        self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
+
+        if bundle_dir is not None:
+            self.corpus = load_corpus_bundle(bundle_dir)
+        if self.corpus is not None:
+            self._validate_corpus_compatibility(self.corpus)
+            self.retrieval = RetrievalEngine(self.embedder, self.corpus.index, self.corpus.metadata)
+        else:
+            self.retrieval = None
+
+        if was_mic_active:
+            self._start_mic()
+        return [self._state_event(self._last_state)]
+
+    def _validate_corpus_compatibility(self, corpus: CorpusBundle) -> None:
+        bundle_metadata = corpus.bundle_metadata
+        if bundle_metadata is None:
+            return
+        if bundle_metadata.model_family != self.embedder.model_family:
+            raise RuntimeError(
+                f"Bundle '{corpus.bundle_dir}' was built for model family "
+                f"'{bundle_metadata.model_family}', but the active model family is '{self.embedder.model_family}'."
+            )
+        if bundle_metadata.model_style != self.embedder.model_style:
+            raise RuntimeError(
+                f"Bundle '{corpus.bundle_dir}' was built for model style "
+                f"'{bundle_metadata.model_style}', but the active model style is '{self.embedder.model_style}'."
+            )
 
     def _start_setup(self) -> List[Dict[str, Any]]:
         self.armed = False
@@ -473,10 +570,11 @@ class SegmentedPhraseWorker:
             "state": state,
             "armed": self.armed,
             "calibrated": self.calibrated,
+            "model_family": self.embedder.model_family,
             "model_style": self.embedder.model_style,
             "live_sample_rate": self.config.sample_rate,
             "pitch_sample_rate": self.config.pitch_sample_rate,
-            "embedding_sample_rate": 16000,
+            "embedding_sample_rate": self.embedder.input_sample_rate,
             "setup_mode": self.setup_mode,
             "setup_stage": self._setup_stage,
             "config": asdict(self.config),
@@ -492,6 +590,9 @@ class SegmentedPhraseWorker:
             event["corpus_backend"] = self.corpus.backend
             event["corpus_dir"] = str(self.corpus.bundle_dir)
             event["num_items"] = len(self.corpus.metadata)
+            if self.corpus.bundle_metadata is not None:
+                event["corpus_model_family"] = self.corpus.bundle_metadata.model_family
+                event["corpus_model_style"] = self.corpus.bundle_metadata.model_style
         event["mic_active"] = self._mic.active if self._mic is not None else False
         return event
 
@@ -516,6 +617,7 @@ class SegmentedPhraseWorker:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pakshi segmented phrase retrieval worker")
     parser.add_argument("--model", type=Path, required=True, help="Path to waveform->embedding ONNX model")
+    parser.add_argument("--model-family", choices=MODEL_FAMILIES, default=None, help="Retrieval model family")
     parser.add_argument("--pitch-model", type=Path, default=None, help="Path to CREPE pitch-segmentation ONNX model")
     parser.add_argument("--bundle", type=Path, default=None, help="Optional corpus bundle to load at startup")
     parser.add_argument("--arm", action="store_true", help="Start in armed/listening mode")
@@ -524,7 +626,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    worker = SegmentedPhraseWorker(model_path=args.model, pitch_model_path=args.pitch_model)
+    worker = SegmentedPhraseWorker(model_path=args.model, pitch_model_path=args.pitch_model, model_family=args.model_family)
     if args.bundle is not None:
         for event in worker.handle_command({"command": "load_corpus", "bundle_dir": str(args.bundle)}):
             worker.emit(event)

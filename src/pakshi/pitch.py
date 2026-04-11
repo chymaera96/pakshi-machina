@@ -122,6 +122,7 @@ def _smooth_pitch_cents(cents: np.ndarray, confidence: np.ndarray, confidence_fl
 def _derive_segment_starts(
     frame_times: np.ndarray,
     cents: np.ndarray,
+    hz: np.ndarray,
     confidence: np.ndarray,
     config: RuntimeConfig,
 ) -> List[float]:
@@ -131,13 +132,14 @@ def _derive_segment_starts(
     starts: List[float] = [0.0]
     confidence_floor = float(config.pitch_confidence_floor)
     threshold = float(config.pitch_change_threshold_cents)
+    min_hz = float(config.pitch_min_hz)
     hold_frames = max(1, int(round(config.pitch_stable_hold_seconds * config.pitch_sample_rate / CREPE_HOP_SAMPLES)))
     gap_frames = max(1, int(round(config.pitch_short_gap_seconds * config.pitch_sample_rate / CREPE_HOP_SAMPLES)))
     min_spacing_seconds = float(config.pitch_min_segment_spacing_seconds)
     phrase_end_guard_seconds = float(config.pitch_phrase_end_guard_seconds)
     phrase_end_time = float(frame_times[-1]) if frame_times.size else 0.0
 
-    voiced = confidence >= confidence_floor
+    voiced = np.logical_and(confidence >= confidence_floor, hz >= min_hz)
     region_values: List[float] = []
     current_ref: Optional[float] = None
     candidate_start: Optional[int] = None
@@ -257,7 +259,7 @@ class CrepePitchTracker:
         cents = _smooth_pitch_cents(cents, confidence, float(config.pitch_confidence_floor))
         hz = np.asarray([_cents_to_hz(value) for value in cents], dtype=np.float32)
         frame_times = (np.arange(frames.shape[0], dtype=np.float32) * float(CREPE_HOP_SAMPLES) / float(config.pitch_sample_rate)).astype(np.float32)
-        starts = _derive_segment_starts(frame_times, cents, confidence, config)
+        starts = _derive_segment_starts(frame_times, cents, hz, confidence, config)
         return PitchAnalysis(
             segment_start_offsets_seconds=starts,
             frame_times_seconds=frame_times.tolist(),

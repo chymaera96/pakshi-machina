@@ -21,3 +21,7 @@ data/ML4BL_ZF/
 data/ml4bl_wavs.jsonl
 
 pakshi_bundle/
+
+debug/
+*.faiss
+*.npy

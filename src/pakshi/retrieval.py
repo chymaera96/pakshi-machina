@@ -20,12 +20,37 @@ except Exception:  # pragma: no cover
     ort = None
 
 
+MODEL_FAMILY_EFFNET_BIO = "effnet_bio"
+MODEL_FAMILY_CREPE_LATENT = "crepe_latent"
+MODEL_FAMILIES = (MODEL_FAMILY_EFFNET_BIO, MODEL_FAMILY_CREPE_LATENT)
+DEFAULT_BUNDLE_DIR_BY_FAMILY = {
+    MODEL_FAMILY_EFFNET_BIO: "pakshi_bundle_effnet_bio",
+    MODEL_FAMILY_CREPE_LATENT: "pakshi_bundle_crepe_latent",
+}
+DEFAULT_SEGMENT_SECONDS_BY_FAMILY = {
+    MODEL_FAMILY_EFFNET_BIO: 0.25,
+    MODEL_FAMILY_CREPE_LATENT: 0.5,
+}
+
 EFFNET_BIO_SAMPLE_RATE = 16_000
 EFFNET_BIO_CLIP_SAMPLES = 4_000
 EFFNET_BIO_N_FFT = 800
 EFFNET_BIO_HOP_LENGTH = 160
 EFFNET_BIO_WIN_LENGTH = 800
 EFFNET_BIO_N_MELS = 128
+
+CREPE_TARGET_SR = 16_000
+CREPE_TARGET_SAMPLES = 16_000
+
+
+@dataclass(frozen=True)
+class BackendDescriptor:
+    model_family: str
+    model_style: str
+    model_path: str
+    input_sample_rate: int
+    default_bundle_dir_name: str
+    preprocessing: str
 
 
 def normalize_rows(vectors: np.ndarray) -> np.ndarray:
@@ -49,6 +74,58 @@ def load_metadata(path: str | Path) -> List[Dict[str, Any]]:
         return rows
     with metadata_path.open("r", encoding="utf-8") as handle:
         return list(__import__("json").load(handle))
+
+
+def infer_model_family(model_path: str | Path) -> str:
+    name = Path(model_path).name.lower()
+    if "effnet" in name:
+        return MODEL_FAMILY_EFFNET_BIO
+    if "crepe" in name:
+        return MODEL_FAMILY_CREPE_LATENT
+    raise ValueError(
+        f"Could not infer model family from '{model_path}'. "
+        f"Pass an explicit family from {MODEL_FAMILIES}."
+    )
+
+
+def default_bundle_dir_name_for_family(model_family: str) -> str:
+    if model_family not in DEFAULT_BUNDLE_DIR_BY_FAMILY:
+        raise ValueError(f"Unsupported model family '{model_family}'. Expected one of {MODEL_FAMILIES}.")
+    return DEFAULT_BUNDLE_DIR_BY_FAMILY[model_family]
+
+
+def default_segment_seconds_for_family(model_family: str) -> float:
+    if model_family not in DEFAULT_SEGMENT_SECONDS_BY_FAMILY:
+        raise ValueError(f"Unsupported model family '{model_family}'. Expected one of {MODEL_FAMILIES}.")
+    return float(DEFAULT_SEGMENT_SECONDS_BY_FAMILY[model_family])
+
+
+def describe_backend(
+    model_path: str | Path,
+    *,
+    model_family: Optional[str] = None,
+    input_sample_rate: Optional[int] = None,
+) -> BackendDescriptor:
+    family = model_family or infer_model_family(model_path)
+    if family == MODEL_FAMILY_EFFNET_BIO:
+        return BackendDescriptor(
+            model_family=family,
+            model_style="effnet_bio_emb1024",
+            model_path=str(model_path),
+            input_sample_rate=int(input_sample_rate or EFFNET_BIO_SAMPLE_RATE),
+            default_bundle_dir_name=default_bundle_dir_name_for_family(family),
+            preprocessing="mono -> 16kHz -> 250ms -> mel_spec[3,128,26]",
+        )
+    if family == MODEL_FAMILY_CREPE_LATENT:
+        return BackendDescriptor(
+            model_family=family,
+            model_style="crepe_latent_1s",
+            model_path=str(model_path),
+            input_sample_rate=int(input_sample_rate or CREPE_TARGET_SR),
+            default_bundle_dir_name=default_bundle_dir_name_for_family(family),
+            preprocessing="mono -> 16kHz -> repeat-pad/crop 1s waveform",
+        )
+    raise ValueError(f"Unsupported model family '{family}'. Expected one of {MODEL_FAMILIES}.")
 
 
 def _resample_waveform(waveform: np.ndarray, source_sr: int, target_sr: int) -> np.ndarray:
@@ -82,6 +159,29 @@ def preprocess_effnet_bio_waveform(
         padded[: wav.size] = wav
         return padded
     return wav[:target_samples].astype(np.float32, copy=False)
+
+
+def preprocess_crepe_waveform(
+    waveform: np.ndarray,
+    sample_rate: int,
+    *,
+    target_sr: int = CREPE_TARGET_SR,
+    target_samples: int = CREPE_TARGET_SAMPLES,
+) -> np.ndarray:
+    wav = np.asarray(waveform, dtype=np.float32)
+    if wav.ndim == 2:
+        wav = wav.mean(axis=1)
+    wav = wav.reshape(-1)
+    if sample_rate != target_sr:
+        wav = _resample_waveform(wav, sample_rate, target_sr)
+    if wav.size == 0:
+        return np.zeros(target_samples, dtype=np.float32)
+    if wav.size < target_samples:
+        reps = target_samples // wav.size + 1
+        wav = np.tile(wav, reps)[:target_samples]
+    else:
+        wav = wav[:target_samples]
+    return wav.astype(np.float32, copy=False)
 
 
 def _hann_window(length: int) -> np.ndarray:
@@ -123,8 +223,7 @@ def compute_effnet_bio_mel_spectrogram(audio: np.ndarray) -> np.ndarray:
         n_frames = 1 + (len(wav) - EFFNET_BIO_N_FFT) // EFFNET_BIO_HOP_LENGTH
         frames = np.stack(
             [
-                wav[j * EFFNET_BIO_HOP_LENGTH : j * EFFNET_BIO_HOP_LENGTH + EFFNET_BIO_N_FFT]
-                * _EFFNET_WINDOW
+                wav[j * EFFNET_BIO_HOP_LENGTH : j * EFFNET_BIO_HOP_LENGTH + EFFNET_BIO_N_FFT] * _EFFNET_WINDOW
                 for j in range(n_frames)
             ],
             axis=0,
@@ -142,6 +241,11 @@ def compute_effnet_bio_mel_spectrogram(audio: np.ndarray) -> np.ndarray:
 
 
 class EmbeddingModel(Protocol):
+    model_family: str
+    model_style: str
+    model_path: str
+    input_sample_rate: int
+
     def embed_batch(self, waveforms: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
         ...
 
@@ -163,6 +267,7 @@ class EffNetBioEmbeddingModel:
         if ort is None:  # pragma: no cover
             raise RuntimeError("onnxruntime is not installed. Add onnxruntime to run the pakshi worker.")
         self.model_path = str(model_path)
+        self.model_family = MODEL_FAMILY_EFFNET_BIO
         self.input_sample_rate = int(input_sample_rate)
         self.providers = list(providers) if providers else ["CPUExecutionProvider"]
         self.batch_size = max(1, int(batch_size))
@@ -185,10 +290,7 @@ class EffNetBioEmbeddingModel:
         if arr.ndim != 2:
             raise ValueError(f"Expected waveform batch of shape [B, T], got {arr.shape}")
         source_sr = int(sample_rate or self.input_sample_rate)
-        prepared = np.stack(
-            [preprocess_effnet_bio_waveform(waveform, source_sr) for waveform in arr],
-            axis=0,
-        )
+        prepared = np.stack([preprocess_effnet_bio_waveform(waveform, source_sr) for waveform in arr], axis=0)
         mel = compute_effnet_bio_mel_spectrogram(prepared)
         fixed_batch_size = getattr(self, "_fixed_batch_size", None)
         if fixed_batch_size in (None, mel.shape[0]):
@@ -208,6 +310,80 @@ class EffNetBioEmbeddingModel:
         if embeddings.ndim != 2:
             raise ValueError(f"Expected EffNetBio output shape [B, D], got {embeddings.shape}")
         return embeddings
+
+
+class CrepeLatentEmbeddingModel:
+    def __init__(self, model_path: str | Path, providers: Optional[Sequence[str]] = None):
+        if ort is None:  # pragma: no cover
+            raise RuntimeError("onnxruntime is not installed. Add onnxruntime to run the pakshi worker.")
+        self.model_path = str(model_path)
+        self.model_family = MODEL_FAMILY_CREPE_LATENT
+        self.input_sample_rate = CREPE_TARGET_SR
+        self.providers = list(providers) if providers else ["CPUExecutionProvider"]
+        self.session = ort.InferenceSession(self.model_path, providers=self.providers)
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_names = [output.name for output in self.session.get_outputs()]
+        self.output_name = self._select_output_name(self.output_names)
+        self.model_style = "crepe_latent_1s"
+        if self.input_name != "audio":
+            raise RuntimeError(f"Expected CREPE input tensor named 'audio', got '{self.input_name}'.")
+
+    def _select_output_name(self, output_names: Sequence[str]) -> str:
+        lowered = {name.lower(): name for name in output_names}
+        for candidate in ["latent", "embedding", "penultimate", "features"]:
+            if candidate in lowered:
+                return lowered[candidate]
+        return output_names[0]
+
+    def embed_batch(self, waveforms: np.ndarray, sample_rate: Optional[int] = None) -> np.ndarray:
+        arr = np.asarray(waveforms, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr[np.newaxis, :]
+        if arr.ndim != 2:
+            raise ValueError(f"Expected waveform batch of shape [B, T], got {arr.shape}")
+        source_sr = int(sample_rate or self.input_sample_rate)
+        batch = np.stack([preprocess_crepe_waveform(waveform, source_sr) for waveform in arr], axis=0).astype(np.float32)
+        outputs = [self._embed_single(waveform) for waveform in batch]
+        return np.stack(outputs, axis=0).astype(np.float32)
+
+    def _embed_single(self, waveform: np.ndarray) -> np.ndarray:
+        out = self.session.run([self.output_name], {self.input_name: waveform.reshape(1, -1)})[0]
+        return self._pool_output(out)
+
+    def _pool_output(self, output: np.ndarray) -> np.ndarray:
+        out = np.asarray(output, dtype=np.float32)
+        if out.ndim == 1:
+            return out
+        if out.ndim == 2:
+            if out.shape[0] == 1:
+                return out[0]
+            return out.mean(axis=0)
+        if out.ndim == 3:
+            if out.shape[0] == 1:
+                return out[0].mean(axis=0)
+            return out.mean(axis=(0, 1))
+        raise ValueError(f"Expected 1D, 2D, or 3D CREPE latent output, got shape {out.shape}")
+
+
+def create_embedding_model(
+    model_path: str | Path,
+    *,
+    model_family: Optional[str] = None,
+    input_sample_rate: int = RuntimeConfig.sample_rate,
+    providers: Optional[Sequence[str]] = None,
+    batch_size: int = RuntimeConfig.embedding_batch_size,
+) -> EmbeddingModel:
+    family = model_family or infer_model_family(model_path)
+    if family == MODEL_FAMILY_EFFNET_BIO:
+        return EffNetBioEmbeddingModel(
+            model_path,
+            input_sample_rate=input_sample_rate,
+            providers=providers,
+            batch_size=batch_size,
+        )
+    if family == MODEL_FAMILY_CREPE_LATENT:
+        return CrepeLatentEmbeddingModel(model_path, providers=providers)
+    raise ValueError(f"Unsupported model family '{family}'. Expected one of {MODEL_FAMILIES}.")
 
 
 class FaissFlatL2Index:

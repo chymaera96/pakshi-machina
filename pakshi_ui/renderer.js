@@ -6,6 +6,8 @@ const setupList = document.getElementById("setup-list");
 const setupSummary = document.getElementById("setup-summary");
 const setupBundleDir = document.getElementById("bundle-dir");
 const performanceBundleDir = document.getElementById("bundle-dir-performance");
+const setupModelFamily = document.getElementById("model-family");
+const performanceModelFamily = document.getElementById("model-family-performance");
 const bootInfo = document.getElementById("boot-info");
 const cuePanel = document.getElementById("cue-panel");
 const cueLabel = document.getElementById("cue-label");
@@ -26,13 +28,14 @@ let gateOpenDb = -42;
 let gateCloseDb = -48;
 const meterFloorDb = -90;
 let pitchControlsReady = false;
+let runtimeBundleOverrideActive = false;
 
 const STATE_COPY = {
   idle: ["Idle", "Enter setup or arm the mic for performance."],
   setup: ["Setup", "Capture room noise, then capture realistic singing."],
   listening: ["Listening", "Microphone hot. Waiting for a sung phrase."],
   in_phrase: ["Recording Phrase", "Phrase detected. Capturing live audio."],
-  processing: ["Retrieving", "Embedding pitch-segmented windows with EffNet-Bio and finding nearest neighbours."],
+  processing: ["Retrieving", "Embedding pitch-segmented windows with the selected retrieval backend and finding nearest neighbours."],
   playing_sequence: ["Playing Response", "Retrieved bird sounds are following the singer's pitch-segment timing."],
 };
 
@@ -61,6 +64,11 @@ function syncBundleFields(value) {
   performanceBundleDir.value = value;
 }
 
+function syncModelFamilyFields(value) {
+  setupModelFamily.value = value;
+  performanceModelFamily.value = value;
+}
+
 function ensureCorpusLoaded() {
   const trimmedBundle = currentBundleDir();
   if (!trimmedBundle) {
@@ -71,6 +79,21 @@ function ensureCorpusLoaded() {
     command: "load_corpus",
     bundle_dir: trimmedBundle,
   });
+}
+
+async function applyModelFamily(value) {
+  syncModelFamilyFields(value);
+  try {
+    const info = await window.pakshi.setModelFamily(value);
+    runtimeBundleOverrideActive = Boolean(info.bundleOverrideActive);
+    if (!runtimeBundleOverrideActive && info.bundle) {
+      syncBundleFields(info.bundle);
+    }
+    bootInfo.textContent =
+      `python: ${info.python} | family: ${info.modelFamily} | model: ${info.model} | pitch: ${info.pitchModel} | bundle: ${info.bundle}`;
+  } catch (error) {
+    appendListItem(playbackList, `error: ${String(error.message || error)}`);
+  }
 }
 
 function setMode(mode) {
@@ -183,6 +206,8 @@ document.getElementById("arm-worker").addEventListener("click", (event) => {
 
 setupBundleDir.addEventListener("input", (event) => syncBundleFields(event.target.value));
 performanceBundleDir.addEventListener("input", (event) => syncBundleFields(event.target.value));
+setupModelFamily.addEventListener("change", (event) => applyModelFamily(event.target.value));
+performanceModelFamily.addEventListener("change", (event) => applyModelFamily(event.target.value));
 pitchThresholdInput.addEventListener("input", (event) => {
   updatePitchThresholdReadout(event.target.value);
   pushPitchParams();
@@ -195,8 +220,10 @@ window.addEventListener("load", () => {
 
 window.pakshi.onWorkerEvent((event) => {
   if (event.type === "ui_boot") {
-    bootInfo.textContent = `python: ${event.python} | model: ${event.model} | pitch: ${event.pitchModel} | bundle: ${event.bundle}`;
+    runtimeBundleOverrideActive = Boolean(event.bundleOverrideActive);
+    bootInfo.textContent = `python: ${event.python} | family: ${event.modelFamily} | model: ${event.model} | pitch: ${event.pitchModel} | bundle: ${event.bundle}`;
     syncBundleFields(event.bundle);
+    syncModelFamilyFields(event.modelFamily);
   }
   if (event.type === "error" || event.type === "setup_error") {
     const message = String(event.message || "").trim();
@@ -218,6 +245,9 @@ window.pakshi.onWorkerEvent((event) => {
     updateMarkers();
     updateSetupSummary(event);
     syncPitchControls(event.config);
+    if (event.model_family) {
+      syncModelFamilyFields(event.model_family);
+    }
     setMode(setupMode || !isCalibrated ? "setup" : "performance");
     setCueState(event.state);
   }

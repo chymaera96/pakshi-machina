@@ -25,7 +25,8 @@ class RuntimeConfig:
     calibration_min_separation_db: float = 8.0
     pitch_sample_rate: int = 16000
     pitch_change_threshold_cents: float = 100.0
-    pitch_confidence_floor: float = 0.5
+    pitch_confidence_floor: float = 0.6
+    pitch_min_hz: float = 120.0
     pitch_stable_hold_seconds: float = 0.06
     pitch_ignore_short_gaps: bool = True
     pitch_short_gap_seconds: float = 0.05

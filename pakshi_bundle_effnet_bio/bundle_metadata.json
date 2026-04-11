@@ -1,0 +1,6 @@
+{
+  "model_family": "effnet_bio",
+  "model_style": "effnet_bio_emb1024",
+  "embedding_sample_rate": 16000,
+  "model_path": "/Users/abhattacharjee/pakshi-machina/effnet_bio_zf_emb1024.onnx"
+}

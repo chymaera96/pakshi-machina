@@ -1,0 +1,6 @@
+{
+  "model_family": "crepe_latent",
+  "model_style": "crepe_latent_1s",
+  "embedding_sample_rate": 16000,
+  "model_path": "/Users/abhattacharjee/pakshi-machina/crepe_latent.onnx"
+}

@@ -13,8 +13,17 @@ import numpy as np
 import soundfile as sf
 
 from src.pakshi.config import RuntimeConfig
-from src.pakshi.corpus import write_metadata_jsonl
-from src.pakshi.retrieval import EffNetBioEmbeddingModel, FaissFlatL2Index, NumpyFlatL2Index, normalize_rows
+from src.pakshi.corpus import BundleMetadata, write_bundle_metadata, write_metadata_jsonl
+from src.pakshi.retrieval import (
+    MODEL_FAMILIES,
+    create_embedding_model,
+    default_bundle_dir_name_for_family,
+    describe_backend,
+    infer_model_family,
+    FaissFlatL2Index,
+    NumpyFlatL2Index,
+    normalize_rows,
+)
 
 
 def _load_manifest(path: Path) -> List[Dict[str, Any]]:
@@ -58,22 +67,27 @@ def _load_audio_batch(rows: Sequence[Dict[str, Any]]) -> List[Tuple[Dict[str, An
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a Pakshi EffNet-Bio corpus bundle from a manifest and ONNX embedding model.")
-    parser.add_argument("--model", type=Path, required=True, help="Path to effnet_bio_zf_emb1024.onnx")
+    parser = argparse.ArgumentParser(description="Build a Pakshi corpus bundle from a manifest and ONNX embedding model.")
+    parser.add_argument("--model", type=Path, required=True, help="Path to retrieval ONNX model")
+    parser.add_argument("--model-family", choices=MODEL_FAMILIES, default=None, help="Optional retrieval model family override")
     parser.add_argument("--manifest", type=Path, required=True, help="JSON or JSONL manifest with sound file metadata")
-    parser.add_argument("--out_dir", type=Path, default=Path("pakshi_bundle_effnet_bio"), help="Output corpus bundle directory")
+    parser.add_argument("--out_dir", type=Path, default=None, help="Output corpus bundle directory")
     parser.add_argument("--sample_rate", type=int, default=RuntimeConfig.sample_rate)
     parser.add_argument("--batch-size", type=int, default=RuntimeConfig.embedding_batch_size)
     args = parser.parse_args()
 
+    model_family = args.model_family or infer_model_family(args.model)
+    out_dir = args.out_dir or Path(default_bundle_dir_name_for_family(model_family))
     manifest = _load_manifest(args.manifest)
     batch_size = max(1, int(args.batch_size))
-    embedder = EffNetBioEmbeddingModel(
+    embedder = create_embedding_model(
         args.model,
+        model_family=model_family,
         input_sample_rate=args.sample_rate,
         batch_size=batch_size,
     )
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    backend = describe_backend(args.model, model_family=model_family, input_sample_rate=embedder.input_sample_rate)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(manifest)
     started_at = time.time()
@@ -104,15 +118,24 @@ def main() -> None:
             _print_progress(batch_start + offset, total, path, started_at)
 
     emb_arr = np.stack(embeddings, axis=0).astype(np.float32)
-    np.save(args.out_dir / "embeddings.npy", emb_arr)
-    write_metadata_jsonl(rows, args.out_dir / "metadata.jsonl")
+    np.save(out_dir / "embeddings.npy", emb_arr)
+    write_metadata_jsonl(rows, out_dir / "metadata.jsonl")
+    write_bundle_metadata(
+        BundleMetadata(
+            model_family=backend.model_family,
+            model_style=backend.model_style,
+            embedding_sample_rate=backend.input_sample_rate,
+            model_path=str(Path(args.model).resolve()),
+        ),
+        out_dir / "bundle_metadata.json",
+    )
 
     try:
-        FaissFlatL2Index.from_embeddings(emb_arr).save(args.out_dir / "index.faiss")
+        FaissFlatL2Index.from_embeddings(emb_arr).save(out_dir / "index.faiss")
     except Exception:
         NumpyFlatL2Index.from_embeddings(emb_arr)
 
-    print(f"Wrote EffNet-Bio corpus bundle to {args.out_dir}")
+    print(f"Wrote {backend.model_family} corpus bundle to {out_dir}")
 
 
 if __name__ == "__main__":

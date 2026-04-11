@@ -10,9 +10,9 @@
     <main class="app-shell">
       <section class="hero">
         <p class="eyebrow">Pakshi Machina</p>
-        <h1>EffNet-Bio Retrieval</h1>
+        <h1>Switchable Retrieval</h1>
         <p class="summary">
-          Noise-gated singing phrases are segmented from CREPE pitch changes. Each pitch-change boundary launches a 0.25 second EffNet-Bio query window. Live audio runs at 16 kHz, and playback follows the original pitch-segment timing.
+          Noise-gated singing phrases are segmented from CREPE pitch changes. Each pitch-change boundary launches a backend-specific query window: 0.25 seconds for EfficientNet or 0.5 seconds for CREPE latent retrieval. Playback follows the original pitch-segment timing.
         </p>
       </section>
 
@@ -41,6 +41,13 @@
         <button id="capture-singing">Capture Singing Level</button>
         <button id="reset-setup" class="secondary">Reset</button>
         <label>
+          Retrieval model
+          <select id="model-family">
+            <option value="effnet_bio">EfficientNet</option>
+            <option value="crepe_latent">CREPE latent</option>
+          </select>
+        </label>
+        <label>
           Bundle directory
           <input id="bundle-dir" type="text" value="./pakshi_bundle_effnet_bio" />
         </label>
@@ -54,6 +61,13 @@
           </span>
         </button>
         <button id="reopen-setup" class="secondary">Setup</button>
+        <label>
+          Retrieval model
+          <select id="model-family-performance">
+            <option value="effnet_bio">EfficientNet</option>
+            <option value="crepe_latent">CREPE latent</option>
+          </select>
+        </label>
         <label>
           Bundle directory
           <input id="bundle-dir-performance" type="text" value="./pakshi_bundle_effnet_bio" />
