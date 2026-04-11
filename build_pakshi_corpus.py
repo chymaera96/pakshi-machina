@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -13,7 +14,14 @@ import numpy as np
 import soundfile as sf
 
 from src.pakshi.config import RuntimeConfig
-from src.pakshi.corpus import BundleMetadata, write_bundle_metadata, write_metadata_jsonl
+from src.pakshi.corpus import (
+    BundleMetadata,
+    VisualizationData,
+    compute_visualization_projection,
+    write_bundle_metadata,
+    write_metadata_jsonl,
+    write_visualization_data,
+)
 from src.pakshi.retrieval import (
     MODEL_FAMILIES,
     create_embedding_model,
@@ -64,6 +72,16 @@ def _load_audio_batch(rows: Sequence[Dict[str, Any]]) -> List[Tuple[Dict[str, An
             audio = audio.mean(axis=1)
         batch.append((row, path, np.asarray(audio, dtype=np.float32), int(sr)))
     return batch
+
+
+def _infer_syllable_type(row: Dict[str, Any]) -> str:
+    for key in ("syl_type", "syllable_type", "type", "category"):
+        value = row.get(key)
+        if value:
+            return str(value)
+    label = str(row.get("name") or Path(str(row.get("path", ""))).stem)
+    match = re.match(r"([A-Za-z]+)", label)
+    return match.group(1) if match else "Unknown"
 
 
 def main() -> None:
@@ -120,6 +138,29 @@ def main() -> None:
     emb_arr = np.stack(embeddings, axis=0).astype(np.float32)
     np.save(out_dir / "embeddings.npy", emb_arr)
     write_metadata_jsonl(rows, out_dir / "metadata.jsonl")
+    mean, components, scale, coords = compute_visualization_projection(emb_arr)
+    points: List[Dict[str, Any]] = []
+    for idx, (row, coord) in enumerate(zip(rows, coords)):
+        label = str(row.get("name") or row.get("label") or Path(str(row.get("path", idx))).stem)
+        points.append(
+            {
+                "index": idx,
+                "label": label,
+                "syl_type": _infer_syllable_type(row),
+                "x": float(coord[0]),
+                "y": float(coord[1]),
+                "z": float(coord[2]),
+            }
+        )
+    write_visualization_data(
+        VisualizationData(
+            points=points,
+            mean=mean,
+            components=components,
+            scale=scale,
+        ),
+        out_dir / "visualization.json",
+    )
     write_bundle_metadata(
         BundleMetadata(
             model_family=backend.model_family,

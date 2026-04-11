@@ -13,7 +13,7 @@ import numpy as np
 
 from .audio import LiveInputStream, NoopSequencePlayer, SoundDeviceSequencePlayer, build_level_estimator
 from .config import RuntimeConfig
-from .corpus import CorpusBundle, load_corpus_bundle
+from .corpus import CorpusBundle, load_corpus_bundle, project_embeddings_3d
 from .pitch import CrepePitchTracker, save_pitch_debug_plot
 from .retrieval import (
     MODEL_FAMILIES,
@@ -516,6 +516,7 @@ class SegmentedPhraseWorker:
                     out.append(debug_event)
                 retrieval = self._retrieve_phrase(phrase)
                 retrieval_event = retrieval.to_event()
+                self._attach_visualization_payload(retrieval_event, retrieval.query_embeddings)
                 out.append(retrieval_event)
                 out.append(self._state_event("playing_sequence" if retrieval.matches else "listening"))
                 self._schedule_sequence(retrieval_event)
@@ -532,6 +533,35 @@ class SegmentedPhraseWorker:
             self._active_playback_phrase_id = int(event["phrase_id"])
             self._stop_mic()
         self._player.play_sequence(event["phrase_id"], event["matches"])
+
+    def _attach_visualization_payload(self, event: Dict[str, Any], query_embeddings: Optional[np.ndarray]) -> None:
+        if self.corpus is None or self.corpus.visualization is None or query_embeddings is None or query_embeddings.size == 0:
+            return
+        visualization = self.corpus.visualization
+        query_pos = project_embeddings_3d(
+            query_embeddings,
+            visualization.mean,
+            visualization.components,
+            visualization.scale,
+        )
+        event["query_pos3d"] = [
+            {"x": float(coord[0]), "y": float(coord[1]), "z": float(coord[2])}
+            for coord in query_pos
+        ]
+        points_by_index = {
+            int(point["index"]): point
+            for point in visualization.points
+            if "index" in point
+        }
+        for match in event.get("matches", []):
+            point = points_by_index.get(int(match["corpus_index"]))
+            if point is None:
+                continue
+            match["pos3d"] = {
+                "x": float(point["x"]),
+                "y": float(point["y"]),
+                "z": float(point["z"]),
+            }
 
     def _emit_segment_started(self, phrase_id: int, match: Dict[str, Any]) -> None:
         self.emit(
@@ -590,6 +620,7 @@ class SegmentedPhraseWorker:
             event["corpus_backend"] = self.corpus.backend
             event["corpus_dir"] = str(self.corpus.bundle_dir)
             event["num_items"] = len(self.corpus.metadata)
+            event["corpus_visualization_ready"] = self.corpus.visualization is not None
             if self.corpus.bundle_metadata is not None:
                 event["corpus_model_family"] = self.corpus.bundle_metadata.model_family
                 event["corpus_model_style"] = self.corpus.bundle_metadata.model_style

@@ -12,19 +12,41 @@ const BUNDLE_DIR_BY_FAMILY = {
 };
 
 let mainWindow = null;
+let visualizationWindow = null;
 let worker = null;
 let workerPaths = null;
 let workerStderrTail = "";
 let selectedModelFamily = process.env.PAKSHI_MODEL_FAMILY || DEFAULT_MODEL_FAMILY;
+let latestUiBoot = null;
+let latestCorpus3D = null;
+let latestVisualizationStatus = null;
+let lastVisualizationBundleDir = null;
+
+function sendToWindow(channel, payload, targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return;
+  }
+  if (!targetWindow.webContents || targetWindow.webContents.isDestroyed()) {
+    return;
+  }
+  targetWindow.webContents.send(channel, payload);
+}
 
 function emitWorkerEvent(payload) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
+  sendToWindow("worker-event", payload, mainWindow);
+  if (payload.type === "ui_boot") {
+    latestUiBoot = payload;
   }
-  if (!mainWindow.webContents || mainWindow.webContents.isDestroyed()) {
-    return;
+  sendToWindow("vis-event", payload, visualizationWindow);
+}
+
+function emitVisualizationEvent(payload) {
+  if (payload.type === "corpus_3d") {
+    latestCorpus3D = payload;
+  } else if (payload.type === "visualization_status") {
+    latestVisualizationStatus = payload;
   }
-  mainWindow.webContents.send("worker-event", payload);
+  sendToWindow("vis-event", payload, visualizationWindow);
 }
 
 function resolvePython(repoRoot) {
@@ -123,6 +145,50 @@ function resolveBundle(repoRoot, modelFamily) {
   return path.join(repoRoot, BUNDLE_DIR_BY_FAMILY[modelFamily] || BUNDLE_DIR_BY_FAMILY[DEFAULT_MODEL_FAMILY]);
 }
 
+function resolveVisualizationFile(bundleDir) {
+  return path.join(bundleDir, "visualization.json");
+}
+
+function loadVisualizationPayload(bundleDir) {
+  if (!bundleDir) {
+    return null;
+  }
+  const visualizationPath = resolveVisualizationFile(bundleDir);
+  if (!fs.existsSync(visualizationPath)) {
+    return null;
+  }
+  const payload = JSON.parse(fs.readFileSync(visualizationPath, "utf8"));
+  return {
+    type: "corpus_3d",
+    bundleDir,
+    points: Array.isArray(payload.points) ? payload.points : [],
+  };
+}
+
+function syncVisualizationBundle(bundleDir) {
+  if (!bundleDir || lastVisualizationBundleDir === bundleDir) {
+    return;
+  }
+  lastVisualizationBundleDir = bundleDir;
+  const payload = loadVisualizationPayload(bundleDir);
+  if (payload) {
+    emitVisualizationEvent(payload);
+    emitVisualizationEvent({
+      type: "visualization_status",
+      ready: true,
+      bundleDir,
+      message: `Loaded ${payload.points.length} corpus points`,
+    });
+    return;
+  }
+  emitVisualizationEvent({
+    type: "visualization_status",
+    ready: false,
+    bundleDir,
+    message: `No visualization.json found in ${bundleDir}`,
+  });
+}
+
 function sendToWorker(payload) {
   if (!worker || worker.killed) {
     emitWorkerEvent({
@@ -134,7 +200,7 @@ function sendToWorker(payload) {
   worker.stdin.write(JSON.stringify(payload) + "\n");
 }
 
-function createWindow() {
+function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
@@ -144,6 +210,38 @@ function createWindow() {
     },
   });
   mainWindow.loadFile(path.join(__dirname, "index.html"));
+}
+
+function createVisualizationWindow() {
+  visualizationWindow = new BrowserWindow({
+    width: 1080,
+    height: 840,
+    backgroundColor: "#0b0d11",
+    title: "Pakshi Machina — Embedding Space",
+    webPreferences: {
+      preload: path.join(__dirname, "vis_preload.js"),
+    },
+  });
+  visualizationWindow.loadFile(path.join(__dirname, "visualization", "embedding_window.html"));
+  visualizationWindow.on("closed", () => {
+    visualizationWindow = null;
+  });
+  visualizationWindow.webContents.on("did-finish-load", () => {
+    if (latestUiBoot) {
+      sendToWindow("vis-event", latestUiBoot, visualizationWindow);
+    }
+    if (latestVisualizationStatus) {
+      sendToWindow("vis-event", latestVisualizationStatus, visualizationWindow);
+    }
+    if (latestCorpus3D) {
+      sendToWindow("vis-event", latestCorpus3D, visualizationWindow);
+    }
+  });
+}
+
+function createWindows() {
+  createMainWindow();
+  createVisualizationWindow();
 }
 
 function stopWorker() {
@@ -191,6 +289,8 @@ function startWorker(overrides = {}) {
     bundleOverrideActive: Boolean(process.env.PAKSHI_BUNDLE_PATH),
   };
   workerStderrTail = "";
+  latestUiBoot = { type: "ui_boot", ...workerPaths };
+  lastVisualizationBundleDir = null;
 
   worker = spawn(python, args, {
     cwd: repoRoot,
@@ -202,10 +302,7 @@ function startWorker(overrides = {}) {
   });
 
   worker.on("spawn", () => {
-    emitWorkerEvent({
-      type: "ui_boot",
-      ...workerPaths,
-    });
+    emitWorkerEvent(latestUiBoot);
   });
 
   worker.on("error", (error) => {
@@ -218,7 +315,11 @@ function startWorker(overrides = {}) {
   const rl = readline.createInterface({ input: worker.stdout });
   rl.on("line", (line) => {
     try {
-      emitWorkerEvent(JSON.parse(line));
+      const payload = JSON.parse(line);
+      emitWorkerEvent(payload);
+      if (payload.type === "state" && payload.corpus_dir) {
+        syncVisualizationBundle(payload.corpus_dir);
+      }
     } catch (error) {
       emitWorkerEvent({ type: "error", message: String(error) });
     }
@@ -246,7 +347,7 @@ function startWorker(overrides = {}) {
 }
 
 app.whenReady().then(() => {
-  createWindow();
+  createWindows();
   ipcMain.handle("worker-command", async (_, payload) => {
     sendToWorker(payload);
     return { ok: true };
@@ -273,16 +374,18 @@ app.whenReady().then(() => {
     }
 
     selectedModelFamily = resolvedModelFamily;
+    workerPaths = info;
+    latestUiBoot = { type: "ui_boot", ...info };
+    emitWorkerEvent(latestUiBoot);
     sendToWorker({
       command: "set_model_backend",
       model_path: model,
       model_family: resolvedModelFamily,
       bundle_dir: bundle,
     });
-    workerPaths = info;
-    emitWorkerEvent({ type: "ui_boot", ...info });
     return { ok: true, ...info };
   });
+
   try {
     startWorker();
   } catch (error) {
@@ -293,8 +396,11 @@ app.whenReady().then(() => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createMainWindow();
+    }
+    if (!visualizationWindow || visualizationWindow.isDestroyed()) {
+      createVisualizationWindow();
     }
   });
 });

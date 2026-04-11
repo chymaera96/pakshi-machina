@@ -14,7 +14,15 @@ if str(REPO_ROOT) not in sys.path:
 from setup_ml4bl import write_wav_manifest
 from src.pakshi.audio import NoopSequencePlayer, rms_dbfs
 from src.pakshi.config import RuntimeConfig
-from src.pakshi.corpus import BundleMetadata, load_corpus_bundle, write_bundle_metadata, write_metadata_jsonl
+from src.pakshi.corpus import (
+    BundleMetadata,
+    VisualizationData,
+    compute_visualization_projection,
+    load_corpus_bundle,
+    write_bundle_metadata,
+    write_metadata_jsonl,
+    write_visualization_data,
+)
 from src.pakshi.pitch import PitchAnalysis
 from src.pakshi import pitch as pitch_module
 from src.pakshi.retrieval import (
@@ -403,6 +411,30 @@ class PakshiRuntimeTests(unittest.TestCase):
             self.assertIsNotNone(corpus.bundle_metadata)
             self.assertEqual(corpus.bundle_metadata.model_family, MODEL_FAMILY_EFFNET_BIO)
 
+    def test_corpus_bundle_reads_visualization_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            embeddings = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+            mean, components, scale, coords = compute_visualization_projection(embeddings)
+            np.save(bundle / "embeddings.npy", embeddings)
+            write_metadata_jsonl([{"path": "a.wav", "name": "DBlue01"}, {"path": "b.wav", "name": "Orange02"}], bundle / "metadata.jsonl")
+            write_visualization_data(
+                VisualizationData(
+                    points=[
+                        {"index": 0, "label": "DBlue01", "syl_type": "DBlue", "x": float(coords[0, 0]), "y": float(coords[0, 1]), "z": float(coords[0, 2])},
+                        {"index": 1, "label": "Orange02", "syl_type": "Orange", "x": float(coords[1, 0]), "y": float(coords[1, 1]), "z": float(coords[1, 2])},
+                    ],
+                    mean=mean,
+                    components=components,
+                    scale=scale,
+                ),
+                bundle / "visualization.json",
+            )
+            corpus = load_corpus_bundle(bundle)
+            self.assertIsNotNone(corpus.visualization)
+            self.assertEqual(len(corpus.visualization.points), 2)
+            self.assertEqual(corpus.visualization.points[0]["syl_type"], "DBlue")
+
     def test_infer_model_family_from_filename(self):
         self.assertEqual(infer_model_family("effnet_bio_zf_emb1024.onnx"), MODEL_FAMILY_EFFNET_BIO)
         self.assertEqual(infer_model_family("crepe_latent.onnx"), MODEL_FAMILY_CREPE_LATENT)
@@ -497,8 +529,21 @@ class PakshiRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
             embeddings = normalize_rows(np.array([[1.0, 1.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float32))
+            mean, components, scale, coords = compute_visualization_projection(embeddings)
             np.save(bundle / "embeddings.npy", embeddings)
             write_metadata_jsonl([{"path": "a.wav", "name": "A"}, {"path": "b.wav", "name": "B"}, {"path": "c.wav", "name": "C"}], bundle / "metadata.jsonl")
+            write_visualization_data(
+                VisualizationData(
+                    points=[
+                        {"index": idx, "label": chr(ord("A") + idx), "syl_type": "Unknown", "x": float(coord[0]), "y": float(coord[1]), "z": float(coord[2])}
+                        for idx, coord in enumerate(coords)
+                    ],
+                    mean=mean,
+                    components=components,
+                    scale=scale,
+                ),
+                bundle / "visualization.json",
+            )
             with mock.patch("src.pakshi.worker.create_embedding_model", fake_create_embedding_model), mock.patch(
                 "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
             ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
@@ -510,6 +555,8 @@ class PakshiRuntimeTests(unittest.TestCase):
                 retrieval = next(event for event in events if event["type"] == "retrieval_sequence_ready")
                 self.assertEqual(retrieval["num_segments"], 3)
                 self.assertEqual([match["scheduled_offset_seconds"] for match in retrieval["matches"]], [0.0, 1.0, 2.0])
+                self.assertEqual(len(retrieval["query_pos3d"]), 3)
+                self.assertTrue(all("pos3d" in match for match in retrieval["matches"]))
 
     def test_worker_rejects_mismatched_bundle_metadata(self):
         model_path = Path("/tmp/crepe_latent.onnx")

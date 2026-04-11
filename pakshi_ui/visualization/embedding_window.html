@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pakshi Machina — Embedding Space</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0b0d11;
+        color: #f1eee9;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body[data-family="effnet"] { background: #0b0d11; }
+      body[data-family="crepe"] { background: #11161d; }
+      #vis { width: 100%; height: 100%; }
+      .hud {
+        position: fixed;
+        left: 18px;
+        top: 16px;
+        z-index: 20;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(8, 10, 14, 0.55);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        max-width: 460px;
+      }
+      .hud h1 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: rgba(255, 255, 255, 0.68);
+        margin-bottom: 6px;
+      }
+      .hud p {
+        font-size: 13px;
+        line-height: 1.4;
+        color: rgba(255, 255, 255, 0.88);
+      }
+      .legend {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 20;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(8, 10, 14, 0.45);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.8);
+      }
+      .legend div + div { margin-top: 6px; }
+    </style>
+  </head>
+  <body data-family="effnet">
+    <div id="vis"></div>
+    <div class="hud">
+      <h1>Embedding Space</h1>
+      <p id="status">Waiting for Pakshi worker state…</p>
+    </div>
+    <div class="legend">
+      <div>White-green pulse: scheduled playback match</div>
+      <div>Red points: live sung query windows</div>
+      <div>Lines: query-to-match links</div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="./embedding_vis.js"></script>
+    <script>
+      window.addEventListener("load", () => {
+        window.embeddingVis.init(document.getElementById("vis"));
+        if (!window.pakshiVis) {
+          window.embeddingVis.setStatus("Visualization bridge is unavailable.");
+          return;
+        }
+        window.pakshiVis.onEvent((event) => {
+          if (event.type === "ui_boot") {
+            window.embeddingVis.applyPalette(event.model || "");
+            window.embeddingVis.setStatus(`Model: ${event.modelFamily} | Bundle: ${event.bundle}`);
+          }
+          if (event.type === "visualization_status") {
+            window.embeddingVis.setStatus(event.message || "Visualization status updated.");
+          }
+          if (event.type === "corpus_3d") {
+            window.embeddingVis.setCorpus(event.points || []);
+            window.embeddingVis.setStatus(`Loaded ${event.points ? event.points.length : 0} corpus points`);
+          }
+          if (event.type === "retrieval_sequence_ready") {
+            window.embeddingVis.resetAll();
+            if (event.query_pos3d) {
+              window.embeddingVis.addLivePoints(event.query_pos3d, event.matches || []);
+            }
+            if (event.matches) {
+              window.embeddingVis.highlightMatches(event.matches);
+            }
+          }
+          if (event.type === "sequence_playback_finished") {
+            window.embeddingVis.resetAll();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

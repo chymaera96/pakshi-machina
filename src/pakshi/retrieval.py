@@ -451,6 +451,7 @@ class SegmentMatch:
 class RetrievalSequence:
     phrase_id: int
     matches: List[SegmentMatch]
+    query_embeddings: Optional[np.ndarray] = None
 
     def to_event(self) -> Dict[str, Any]:
         return {
@@ -489,7 +490,7 @@ class RetrievalEngine:
 
     def query_segments(self, phrase_id: int, segments: Sequence[Segment]) -> RetrievalSequence:
         if not segments:
-            return RetrievalSequence(phrase_id=phrase_id, matches=[])
+            return RetrievalSequence(phrase_id=phrase_id, matches=[], query_embeddings=np.zeros((0, 0), dtype=np.float32))
         batch = np.stack([seg.waveform for seg in segments], axis=0).astype(np.float32)
         emb = normalize_rows(self.embedder.embed_batch(batch, sample_rate=self.sample_rate))
         distances, indices = self.index.search(emb, k=1)
@@ -511,4 +512,4 @@ class RetrievalEngine:
                     scheduled_offset_seconds=seg.scheduled_offset_seconds,
                 )
             )
-        return RetrievalSequence(phrase_id=phrase_id, matches=matches)
+        return RetrievalSequence(phrase_id=phrase_id, matches=matches, query_embeddings=emb)
