@@ -226,10 +226,23 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
         self.output_gain = output_gain
         self._cache: Dict[str, np.ndarray] = {}
 
+    def _apply_edge_fade(self, audio: np.ndarray, fade_seconds: float = 0.005) -> np.ndarray:
+        arr = np.asarray(audio, dtype=np.float32).copy()
+        if arr.size == 0:
+            return arr
+        fade_samples = min(int(round(fade_seconds * self.sample_rate)), arr.size // 2)
+        if fade_samples <= 1:
+            return arr
+        ramp = np.linspace(0.0, 1.0, num=fade_samples, endpoint=True, dtype=np.float32)
+        arr[:fade_samples] *= ramp
+        arr[-fade_samples:] *= ramp[::-1]
+        return arr
+
     def _load_clip(self, path: str) -> np.ndarray:
         if path not in self._cache:
             audio, _ = librosa.load(Path(path), sr=self.sample_rate, mono=True)
-            self._cache[path] = (audio * self.output_gain).astype(np.float32)
+            audio = (audio * self.output_gain).astype(np.float32)
+            self._cache[path] = self._apply_edge_fade(audio)
         return self._cache[path]
 
     def play_sequence(self, phrase_id: int, matches: Sequence[dict]) -> None:
@@ -268,6 +281,10 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
                         else:
                             survivors.append(voice)
                     active_voices[:] = survivors
+                peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
+                if peak > 0.95:
+                    mixed *= np.float32(0.95 / peak)
+                mixed = np.tanh(mixed * np.float32(1.1)) / np.float32(np.tanh(1.1))
                 outdata[:, 0] = np.clip(mixed, -1.0, 1.0)
                 for match in completed:
                     finished_queue.put(match)
