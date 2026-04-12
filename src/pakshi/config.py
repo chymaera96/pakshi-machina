@@ -21,7 +21,7 @@ class RuntimeConfig:
     output_gain: float = 1.0
     meter_floor_db: float = -90.0
     calibration_noise_seconds: float = 2.5
-    calibration_singing_seconds: float = 8.0
+    calibration_singing_seconds: float = 4.0
     calibration_min_separation_db: float = 8.0
     pitch_sample_rate: int = 16000
     pitch_change_threshold_cents: float = 100.0
