@@ -75,6 +75,10 @@ class SegmentedPhraseWorker:
         self._candidate_gate_close_db: Optional[float] = None
         self._resume_after_playback = False
         self._active_playback_phrase_id: Optional[int] = None
+        self._arm_ready_at: Optional[float] = None
+        self._runtime_warmed = False
+        self._player_warmed_for_bundle: Optional[str] = None
+        self._warm_runtime()
 
     def _build_player(self):
         try:
@@ -101,6 +105,7 @@ class SegmentedPhraseWorker:
             self.corpus = load_corpus_bundle(bundle_dir)
             self._validate_corpus_compatibility(self.corpus)
             self.retrieval = RetrievalEngine(self.embedder, self.corpus.index, self.corpus.metadata)
+            self._warm_player_cache()
             return [self._state_event("idle")]
         if kind == "set_model_backend":
             return self._set_model_backend(
@@ -166,6 +171,10 @@ class SegmentedPhraseWorker:
             self._validate_corpus_compatibility(self.corpus)
             self.retrieval = RetrievalEngine(self.embedder, self.corpus.index, self.corpus.metadata)
         self._player = self._build_player()
+        self._runtime_warmed = False
+        self._player_warmed_for_bundle = None
+        self._warm_runtime()
+        self._warm_player_cache()
         self._smoothed_level_db = self.config.meter_floor_db
         self._level_estimator = build_level_estimator()
         if self.armed or self._setup_stage in {"capture_noise", "capture_singing"}:
@@ -208,9 +217,51 @@ class SegmentedPhraseWorker:
         else:
             self.retrieval = None
 
+        self._runtime_warmed = False
+        self._player_warmed_for_bundle = None
+        self._warm_runtime()
+        self._warm_player_cache()
+
         if was_mic_active:
             self._start_mic()
         return [self._state_event(self._last_state)]
+
+    def _warm_runtime(self) -> None:
+        if self._runtime_warmed:
+            return
+        try:
+            warmup_pitch = getattr(self.pitch_tracker, "warmup", None)
+            if callable(warmup_pitch):
+                warmup_pitch()
+        except Exception:
+            pass
+        try:
+            warmup_embedder = getattr(self.embedder, "warmup", None)
+            if callable(warmup_embedder):
+                warmup_embedder()
+        except Exception:
+            pass
+        self._runtime_warmed = True
+
+    def _warm_player_cache(self) -> None:
+        if self.corpus is None:
+            return
+        bundle_key = str(self.corpus.bundle_dir)
+        if self._player_warmed_for_bundle == bundle_key:
+            return
+        warmup_player = getattr(self._player, "warmup", None)
+        if not callable(warmup_player):
+            return
+        candidate_paths: List[str] = []
+        for row in self.corpus.metadata[:8]:
+            path = row.get("path")
+            if path:
+                candidate_paths.append(str(path))
+        try:
+            warmup_player(candidate_paths)
+            self._player_warmed_for_bundle = bundle_key
+        except Exception:
+            pass
 
     def _validate_corpus_compatibility(self, corpus: CorpusBundle) -> None:
         bundle_metadata = corpus.bundle_metadata
@@ -293,10 +344,12 @@ class SegmentedPhraseWorker:
         self._setup_stage = "idle"
         self.armed = True
         self._start_mic()
+        self._arm_ready_at = time.time() + max(0.0, float(self.config.arm_warmup_seconds))
         return [self._state_event("listening")]
 
     def _disarm_worker(self) -> List[Dict[str, Any]]:
         self.armed = False
+        self._arm_ready_at = None
         self._player.clear()
         self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         self._stop_mic()
@@ -304,6 +357,7 @@ class SegmentedPhraseWorker:
 
     def _clear_queue_restart(self) -> List[Dict[str, Any]]:
         self._player.clear()
+        self._arm_ready_at = None
         self.segmenter = PhraseSegmenter(self.config, pitch_tracker=self.pitch_tracker)
         events = [{"type": "queue_cleared"}]
         if self.armed:
@@ -350,6 +404,10 @@ class SegmentedPhraseWorker:
             return
 
         now_seconds = timestamp - self._stream_started_at if self._stream_started_at is not None else None
+        if self._arm_ready_at is not None and timestamp < self._arm_ready_at:
+            self.segmenter.process_frame(frame, self.config.meter_floor_db, now_seconds=now_seconds)
+            return
+        self._arm_ready_at = None
         for event in self._handle_frame(frame, self._smoothed_level_db, now_seconds=now_seconds):
             self.emit(event)
 
@@ -591,6 +649,7 @@ class SegmentedPhraseWorker:
             self._resume_after_playback = False
             self._active_playback_phrase_id = None
             self._start_mic()
+            self._arm_ready_at = time.time() + max(0.0, float(self.config.arm_warmup_seconds))
             self.emit(self._state_event("listening"))
 
     def _state_event(self, state: str) -> Dict[str, Any]:

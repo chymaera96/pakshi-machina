@@ -203,6 +203,9 @@ class NoopSequencePlayer:
     def clear(self) -> None:
         self.stop()
 
+    def warmup(self, paths: Sequence[str] | None = None) -> None:
+        return None
+
 
 class SoundDeviceSequencePlayer(NoopSequencePlayer):
     def __init__(
@@ -244,6 +247,31 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
             audio = (audio * self.output_gain).astype(np.float32)
             self._cache[path] = self._apply_edge_fade(audio)
         return self._cache[path]
+
+    def warmup(self, paths: Sequence[str] | None = None) -> None:
+        if paths:
+            for path in paths:
+                try:
+                    self._load_clip(path)
+                except Exception:
+                    continue
+        stream = None
+        try:
+            stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype="float32",
+            )
+            stream.start()
+        except Exception:
+            return
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
 
     def play_sequence(self, phrase_id: int, matches: Sequence[dict]) -> None:
         self.stop()

@@ -88,6 +88,7 @@ class FakeEffNetBioEmbeddingModel:
         self.batch_size = batch_size
         self.model_family = MODEL_FAMILY_EFFNET_BIO
         self.model_style = "effnet_bio_emb1024"
+        self.warmup_calls = 0
 
     def embed_batch(self, waveforms: np.ndarray, sample_rate=None) -> np.ndarray:
         waveforms = np.asarray(waveforms, dtype=np.float32)
@@ -101,6 +102,9 @@ class FakeEffNetBioEmbeddingModel:
         means = processed.mean(axis=1, keepdims=True)
         maxes = processed.max(axis=1, keepdims=True)
         return np.concatenate([means, maxes], axis=1).astype(np.float32)
+
+    def warmup(self):
+        self.warmup_calls += 1
 
 
 class FakeCrepeSession2D:
@@ -126,6 +130,7 @@ class FakeCrepeLatentEmbeddingModel:
         self.input_sample_rate = CREPE_TARGET_SR
         self.model_family = MODEL_FAMILY_CREPE_LATENT
         self.model_style = "crepe_latent_1s"
+        self.warmup_calls = 0
 
     def embed_batch(self, waveforms: np.ndarray, sample_rate=None) -> np.ndarray:
         waveforms = np.asarray(waveforms, dtype=np.float32)
@@ -140,6 +145,9 @@ class FakeCrepeLatentEmbeddingModel:
         maxes = processed.max(axis=1, keepdims=True)
         return np.concatenate([means, maxes], axis=1).astype(np.float32)
 
+    def warmup(self):
+        self.warmup_calls += 1
+
 
 def fake_create_embedding_model(model_path, model_family=None, input_sample_rate=16000, providers=None, batch_size=32):
     family = model_family or infer_model_family(model_path)
@@ -152,6 +160,10 @@ class FakePitchTracker:
     def __init__(self, model_path, providers=None, frame_batch_size=512):
         self.model_path = str(model_path)
         self.frame_batch_size = frame_batch_size
+        self.warmup_calls = 0
+
+    def warmup(self):
+        self.warmup_calls += 1
 
     def analyze(self, waveform, sample_rate, config):
         return PitchAnalysis(
@@ -637,6 +649,47 @@ class PakshiRuntimeTests(unittest.TestCase):
                 self.assertEqual(worker.singing_soft_db, -24.0)
                 self.assertEqual(worker.config.segment_seconds, 0.5)
                 self.assertEqual(events[0]["model_family"], MODEL_FAMILY_CREPE_LATENT)
+
+    def test_worker_warms_pitch_and_embedding_models(self):
+        with mock.patch("src.pakshi.worker.create_embedding_model", fake_create_embedding_model), mock.patch(
+            "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
+        ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
+            worker = SegmentedPhraseWorker(
+                model_path="/tmp/effnet_bio_zf_emb1024.onnx",
+                pitch_model_path="crepe_pitch.onnx",
+                model_family=MODEL_FAMILY_EFFNET_BIO,
+            )
+            self.assertEqual(worker.pitch_tracker.warmup_calls, 1)
+            self.assertEqual(worker.embedder.warmup_calls, 1)
+
+    def test_arm_warmup_primes_preroll_before_first_phrase(self):
+        model_path = Path("/Users/abhattacharjee/Downloads/trained_models/effnet_bio/effnet_bio_zf_emb1024.onnx")
+        cfg = RuntimeConfig(
+            sample_rate=100,
+            pitch_sample_rate=100,
+            input_frame_seconds=0.1,
+            pre_roll_seconds=0.2,
+            gate_open_db=-40.0,
+            gate_close_db=-48.0,
+            gate_hold_seconds=0.1,
+            arm_warmup_seconds=0.25,
+        )
+        with mock.patch("src.pakshi.worker.create_embedding_model", fake_create_embedding_model), mock.patch(
+            "src.pakshi.worker.CrepePitchTracker", FakePitchTracker
+        ), mock.patch("src.pakshi.worker.LiveInputStream", FakeLiveInputStream):
+            worker = SegmentedPhraseWorker(model_path=model_path, config=cfg, pitch_model_path="crepe_pitch.onnx")
+            worker.calibrated = True
+            worker.handle_command({"command": "arm"})
+            assert worker._stream_started_at is not None
+            timestamp = worker._stream_started_at + 0.05
+            worker._handle_live_frame(db_frame(-10.0, cfg.input_frame_samples()), timestamp)
+            self.assertFalse(worker.segmenter.is_active)
+            timestamp = worker._arm_ready_at + 0.01
+            worker._handle_live_frame(db_frame(-10.0, cfg.input_frame_samples()), timestamp)
+            self.assertFalse(worker.segmenter.is_active)
+            timestamp += cfg.input_frame_seconds
+            worker._handle_live_frame(db_frame(-10.0, cfg.input_frame_samples()), timestamp)
+            self.assertTrue(worker.segmenter.is_active)
 
     def test_noop_sequence_player_preserves_pitch_segment_offsets(self):
         started = []

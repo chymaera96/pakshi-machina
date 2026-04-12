@@ -311,6 +311,10 @@ class EffNetBioEmbeddingModel:
             raise ValueError(f"Expected EffNetBio output shape [B, D], got {embeddings.shape}")
         return embeddings
 
+    def warmup(self) -> None:
+        dummy = np.zeros((1, EFFNET_BIO_CLIP_SAMPLES), dtype=np.float32)
+        self.embed_batch(dummy, sample_rate=self.input_sample_rate)
+
 
 class CrepeLatentEmbeddingModel:
     def __init__(self, model_path: str | Path, providers: Optional[Sequence[str]] = None):
@@ -363,6 +367,10 @@ class CrepeLatentEmbeddingModel:
                 return out[0].mean(axis=0)
             return out.mean(axis=(0, 1))
         raise ValueError(f"Expected 1D, 2D, or 3D CREPE latent output, got shape {out.shape}")
+
+    def warmup(self) -> None:
+        dummy = np.zeros((1, CREPE_TARGET_SAMPLES), dtype=np.float32)
+        self.embed_batch(dummy, sample_rate=self.input_sample_rate)
 
 
 def create_embedding_model(

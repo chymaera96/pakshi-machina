@@ -16,6 +16,7 @@ class RuntimeConfig:
     min_phrase_seconds: float = 0.25
     max_phrase_seconds: float = 12.0
     cooldown_seconds: float = 0.2
+    arm_warmup_seconds: float = 0.25
     envelope_smoothing: float = 0.72
     stitch_gap_seconds: float = 0.15
     output_gain: float = 1.0

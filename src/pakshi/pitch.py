@@ -225,6 +225,10 @@ class CrepePitchTracker:
         if self.input_name != "frames":
             raise RuntimeError(f"Expected CREPE pitch model input tensor named 'frames', got '{self.input_name}'.")
 
+    def warmup(self) -> None:
+        dummy = np.zeros((1, CREPE_FRAME_SAMPLES), dtype=np.float32)
+        self.session.run([self.output_name], {self.input_name: dummy})
+
     def _infer_frames(self, frames: np.ndarray) -> np.ndarray:
         if frames.size == 0:
             return np.zeros((0, CREPE_BINS), dtype=np.float32)
