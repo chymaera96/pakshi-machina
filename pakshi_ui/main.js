@@ -10,6 +10,11 @@ const BUNDLE_DIR_BY_FAMILY = {
   effnet_bio: "pakshi_bundle_effnet_bio",
   crepe_latent: "pakshi_bundle_crepe_latent",
 };
+const VISUALIZATION_DISABLED =
+  process.env.PAKSHI_DISABLE_VISUALIZATION === "1" ||
+  process.env.PAKSHI_DISABLE_VISUALIZATION === "true" ||
+  process.argv.includes("--no-vis") ||
+  process.argv.includes("--disable-visualization");
 
 let mainWindow = null;
 let visualizationWindow = null;
@@ -37,10 +42,15 @@ function emitWorkerEvent(payload) {
   if (payload.type === "ui_boot") {
     latestUiBoot = payload;
   }
-  sendToWindow("vis-event", payload, visualizationWindow);
+  if (!VISUALIZATION_DISABLED) {
+    sendToWindow("vis-event", payload, visualizationWindow);
+  }
 }
 
 function emitVisualizationEvent(payload) {
+  if (VISUALIZATION_DISABLED) {
+    return;
+  }
   if (payload.type === "corpus_3d") {
     latestCorpus3D = payload;
   } else if (payload.type === "visualization_status") {
@@ -166,6 +176,9 @@ function loadVisualizationPayload(bundleDir) {
 }
 
 function syncVisualizationBundle(bundleDir) {
+  if (VISUALIZATION_DISABLED) {
+    return;
+  }
   if (!bundleDir || lastVisualizationBundleDir === bundleDir) {
     return;
   }
@@ -213,6 +226,9 @@ function createMainWindow() {
 }
 
 function createVisualizationWindow() {
+  if (VISUALIZATION_DISABLED) {
+    return;
+  }
   visualizationWindow = new BrowserWindow({
     width: 1080,
     height: 840,
@@ -241,7 +257,9 @@ function createVisualizationWindow() {
 
 function createWindows() {
   createMainWindow();
-  createVisualizationWindow();
+  if (!VISUALIZATION_DISABLED) {
+    createVisualizationWindow();
+  }
 }
 
 function stopWorker() {
@@ -399,7 +417,7 @@ app.whenReady().then(() => {
     if (!mainWindow || mainWindow.isDestroyed()) {
       createMainWindow();
     }
-    if (!visualizationWindow || visualizationWindow.isDestroyed()) {
+    if (!VISUALIZATION_DISABLED && (!visualizationWindow || visualizationWindow.isDestroyed())) {
       createVisualizationWindow();
     }
   });
