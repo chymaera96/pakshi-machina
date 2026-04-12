@@ -96,15 +96,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Delete and re-extract the ML4BL_ZF directory if it already exists",
     )
-    parser.add_argument(
-        "--write-manifest",
-        action="store_true",
-        help="Also write a JSONL manifest for data/ML4BL_ZF/wavs",
-    )
+    # parser.add_argument(
+    #     "--write-manifest",
+    #     action="store_true",
+    #     help="Also write a JSONL manifest for data/ML4BL_ZF/wavs",
+    # )
     parser.add_argument(
         "--manifest-path",
         type=Path,
-        default=None,
+        default="data/ml4bl_wavs.jsonl",
         help="Optional output path for the generated manifest JSONL",
     )
     return parser.parse_args()
@@ -114,11 +114,14 @@ def main() -> None:
     args = parse_args()
     data_dir = args.data_dir.resolve()
     zip_path = data_dir / ML4BL_ZIP_NAME
-    dataset_dir = extract_zip(
-        download_zip(zip_path, force=args.force_download),
-        data_dir,
-        force=args.force_extract,
-    )
+
+    dataset_dir = data_dir / ML4BL_DIR_NAME
+    if not data_dir.exists():
+        dataset_dir = extract_zip(
+            download_zip(zip_path, force=args.force_download),
+            data_dir,
+            force=args.force_extract,
+        )
 
     wav_dir = dataset_dir / "wavs"
     if not wav_dir.exists():
@@ -129,11 +132,10 @@ def main() -> None:
     print(f"ML4BL record: {ML4BL_RECORD_URL}")
     print(f"WAV directory ready: {wav_dir}")
 
-    if args.write_manifest:
-        manifest_path = args.manifest_path
-        if manifest_path is None:
-            manifest_path = data_dir / "ml4bl_wavs.jsonl"
-        write_wav_manifest(wav_dir, manifest_path.resolve())
+    manifest_path = args.manifest_path
+    if manifest_path is None:
+        manifest_path = data_dir / "ml4bl_wavs.jsonl"
+    write_wav_manifest(wav_dir, manifest_path.resolve())
 
 
 if __name__ == "__main__":

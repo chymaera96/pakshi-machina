@@ -9,6 +9,8 @@ MANIFEST_PATH="${REPO_ROOT}/data/ml4bl_wavs.jsonl"
 EFFNET_BUNDLE_PATH="${REPO_ROOT}/pakshi_bundle_effnet_bio"
 CREPE_BUNDLE_PATH="${REPO_ROOT}/pakshi_bundle_crepe_latent"
 
+python "${REPO_ROOT}/setup_ml4bl.py"
+
 python "${REPO_ROOT}/build_pakshi_corpus.py" \
   --model "${EFFNET_MODEL_PATH}" \
   --model-family effnet_bio \
