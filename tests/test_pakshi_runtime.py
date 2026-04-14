@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from setup_ml4bl import write_wav_manifest
-from src.pakshi.audio import NoopSequencePlayer, rms_dbfs
+from src.pakshi.audio import NoopSequencePlayer, SoundDeviceSequencePlayer, rms_dbfs
 from src.pakshi.config import RuntimeConfig
 from src.pakshi.corpus import (
     BundleMetadata,
@@ -465,6 +465,23 @@ class PakshiRuntimeTests(unittest.TestCase):
     def test_repo_default_assets_exist(self):
         repo_root = Path(__file__).resolve().parents[1]
         self.assertTrue((repo_root / "pakshi_bundle_effnet_bio").exists() or True)
+
+    def test_sounddevice_player_prefers_soundfile_decode(self):
+        player = SoundDeviceSequencePlayer(
+            sample_rate=16000,
+            output_gain=1.0,
+            on_started=lambda _phrase_id, _match: None,
+            on_finished=lambda _phrase_id, _match: None,
+            cache_size=2,
+        )
+        stereo = np.stack([np.ones(8, dtype=np.float32), np.ones(8, dtype=np.float32) * 0.5], axis=1)
+        with mock.patch("src.pakshi.audio.sf.read", return_value=(stereo, 16000)), mock.patch(
+            "src.pakshi.audio.librosa.load"
+        ) as librosa_load:
+            audio = player._load_clip("a.wav")
+            librosa_load.assert_not_called()
+            self.assertEqual(audio.ndim, 1)
+            self.assertEqual(audio.shape[0], 8)
 
     def test_worker_can_load_default_bundle_with_fakes(self):
         repo_root = Path(__file__).resolve().parents[1]

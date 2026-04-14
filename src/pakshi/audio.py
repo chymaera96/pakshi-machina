@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 import librosa
 import numpy as np
+import soundfile as sf
 
 try:
     import sounddevice as sd  # type: ignore
@@ -246,7 +247,16 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
 
     def _load_clip(self, path: str) -> np.ndarray:
         if path not in self._cache:
-            audio, _ = librosa.load(Path(path), sr=self.sample_rate, mono=True)
+            clip_path = Path(path)
+            try:
+                audio, sr = sf.read(clip_path, dtype="float32")
+                if audio.ndim == 2:
+                    audio = audio.mean(axis=1)
+                audio = np.asarray(audio, dtype=np.float32)
+                if int(sr) != self.sample_rate:
+                    audio = librosa.resample(audio, orig_sr=int(sr), target_sr=self.sample_rate).astype(np.float32)
+            except Exception:
+                audio, _ = librosa.load(clip_path, sr=self.sample_rate, mono=True)
             audio = (audio * self.output_gain).astype(np.float32)
             self._cache[path] = self._apply_edge_fade(audio)
             self._cache.move_to_end(path)
