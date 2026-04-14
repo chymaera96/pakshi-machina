@@ -34,10 +34,11 @@ class RuntimeConfig:
     pitch_min_segment_spacing_seconds: float = 0.12
     pitch_phrase_end_guard_seconds: float = 0.2
     pitch_frame_batch_size: int = 512
-    save_pitch_debug_plots: bool = True
+    save_pitch_debug_plots: bool = False
     pitch_debug_dir: str = "debug/pitch"
     embedding_batch_size: int = 32
     embedding_live_max_batch_size: int = 16
+    playback_clip_cache_size: int = 48
 
     def segment_samples(self) -> int:
         return int(round(self.segment_seconds * self.sample_rate))

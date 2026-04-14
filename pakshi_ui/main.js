@@ -23,6 +23,7 @@ let workerPaths = null;
 let workerStderrTail = "";
 let selectedModelFamily = process.env.PAKSHI_MODEL_FAMILY || DEFAULT_MODEL_FAMILY;
 let latestUiBoot = null;
+let latestWorkerState = null;
 let latestCorpus3D = null;
 let latestVisualizationStatus = null;
 let lastVisualizationBundleDir = null;
@@ -41,6 +42,8 @@ function emitWorkerEvent(payload) {
   sendToWindow("worker-event", payload, mainWindow);
   if (payload.type === "ui_boot") {
     latestUiBoot = payload;
+  } else if (payload.type === "state") {
+    latestWorkerState = payload;
   }
   if (!VISUALIZATION_DISABLED) {
     sendToWindow("vis-event", payload, visualizationWindow);
@@ -223,6 +226,14 @@ function createMainWindow() {
     },
   });
   mainWindow.loadFile(path.join(__dirname, "index.html"));
+  mainWindow.webContents.on("did-finish-load", () => {
+    if (latestUiBoot) {
+      sendToWindow("worker-event", latestUiBoot, mainWindow);
+    }
+    if (latestWorkerState) {
+      sendToWindow("worker-event", latestWorkerState, mainWindow);
+    }
+  });
 }
 
 function createVisualizationWindow() {
@@ -308,6 +319,7 @@ function startWorker(overrides = {}) {
   };
   workerStderrTail = "";
   latestUiBoot = { type: "ui_boot", ...workerPaths };
+  latestWorkerState = null;
   lastVisualizationBundleDir = null;
 
   worker = spawn(python, args, {
@@ -365,7 +377,6 @@ function startWorker(overrides = {}) {
 }
 
 app.whenReady().then(() => {
-  createWindows();
   ipcMain.handle("worker-command", async (_, payload) => {
     sendToWorker(payload);
     return { ok: true };
@@ -403,6 +414,8 @@ app.whenReady().then(() => {
     });
     return { ok: true, ...info };
   });
+
+  createWindows();
 
   try {
     startWorker();

@@ -29,6 +29,13 @@ let gateCloseDb = -48;
 const meterFloorDb = -90;
 let pitchControlsReady = false;
 let runtimeBundleOverrideActive = false;
+const MAX_LOG_ITEMS = 60;
+const METER_UPDATE_INTERVAL_MS = 80;
+const STATE_JSON_UPDATE_INTERVAL_MS = 150;
+let latestHotMicEvent = null;
+let meterFlushHandle = null;
+let latestStateJsonEvent = null;
+let stateJsonFlushHandle = null;
 
 const STATE_COPY = {
   idle: ["Idle", "Enter setup or arm the mic for performance."],
@@ -45,6 +52,58 @@ function appendListItem(list, text) {
   const item = document.createElement("li");
   item.textContent = text;
   list.prepend(item);
+  while (list.children.length > MAX_LOG_ITEMS) {
+    list.removeChild(list.lastChild);
+  }
+}
+
+function flushMeterEvent() {
+  meterFlushHandle = null;
+  if (!latestHotMicEvent) {
+    return;
+  }
+  const event = latestHotMicEvent;
+  latestHotMicEvent = null;
+  gateOpenDb = event.gate_open_db ?? gateOpenDb;
+  gateCloseDb = event.gate_close_db ?? gateCloseDb;
+  updateMarkers();
+  const envelope = Math.max(0, Math.min(1, (event.envelope_db + 90) / 90));
+  levelFill.style.width = `${envelope * 100}%`;
+  monitorReadout.textContent = `level ${event.envelope_db.toFixed(1)} dB | gate ${event.gate_state}`;
+}
+
+function queueMeterEvent(event) {
+  latestHotMicEvent = event;
+  if (meterFlushHandle !== null) {
+    return;
+  }
+  meterFlushHandle = window.setTimeout(flushMeterEvent, METER_UPDATE_INTERVAL_MS);
+}
+
+function flushStateJsonEvent() {
+  stateJsonFlushHandle = null;
+  if (!latestStateJsonEvent) {
+    return;
+  }
+  stateJson.textContent = JSON.stringify(latestStateJsonEvent, null, 2);
+  latestStateJsonEvent = null;
+}
+
+function updateStateJson(event, immediate = false) {
+  if (immediate) {
+    latestStateJsonEvent = null;
+    if (stateJsonFlushHandle !== null) {
+      window.clearTimeout(stateJsonFlushHandle);
+      stateJsonFlushHandle = null;
+    }
+    stateJson.textContent = JSON.stringify(event, null, 2);
+    return;
+  }
+  latestStateJsonEvent = event;
+  if (stateJsonFlushHandle !== null) {
+    return;
+  }
+  stateJsonFlushHandle = window.setTimeout(flushStateJsonEvent, STATE_JSON_UPDATE_INTERVAL_MS);
 }
 
 function pulseButton(button) {
@@ -229,7 +288,7 @@ window.pakshi.onWorkerEvent((event) => {
     const message = String(event.message || "").trim();
     lastErrorMessage = message || lastErrorMessage;
     appendListItem(playbackList, `error: ${message}`);
-    stateJson.textContent = JSON.stringify(event, null, 2);
+    updateStateJson(event, true);
     if (event.type === "setup_error") {
       cueLabel.textContent = "Setup Error";
       cueText.textContent = message;
@@ -301,12 +360,9 @@ window.pakshi.onWorkerEvent((event) => {
     monitorReadout.textContent = "level -inf dB | gate below";
   }
   if (event.type === "mic_level") {
-    gateOpenDb = event.gate_open_db ?? gateOpenDb;
-    gateCloseDb = event.gate_close_db ?? gateCloseDb;
-    updateMarkers();
-    const envelope = Math.max(0, Math.min(1, (event.envelope_db + 90) / 90));
-    levelFill.style.width = `${envelope * 100}%`;
-    monitorReadout.textContent = `level ${event.envelope_db.toFixed(1)} dB | gate ${event.gate_state}`;
+    queueMeterEvent(event);
+    updateStateJson(event, false);
+    return;
   }
   if (event.type === "phrase_summary") {
     const starts = (event.segment_start_offsets_seconds || []).map((value) => value.toFixed(2)).join(", ");
@@ -347,5 +403,5 @@ window.pakshi.onWorkerEvent((event) => {
       appendListItem(playbackList, `stderr: ${String(event.stderrTail).trim()}`);
     }
   }
-  stateJson.textContent = JSON.stringify(event, null, 2);
+  updateStateJson(event, true);
 });

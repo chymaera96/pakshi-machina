@@ -5,8 +5,8 @@
   "description": "Electron control surface for Pakshi segmented phrase retrieval.",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
-    "start:trace": "ELECTRON_ENABLE_LOGGING=1 electron ."
+    "start": "node ./scripts/start-electron.js .",
+    "start:trace": "node ./scripts/start-electron.js --trace"
   },
   "dependencies": {
     "electron": "^41.1.1"

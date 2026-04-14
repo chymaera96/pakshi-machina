@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import queue
 import threading
 import time
@@ -216,6 +217,7 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
         on_finished: Callable[[int, dict], None],
         stitch_gap_seconds: float = 0.15,
         on_sequence_finished: Optional[Callable[[int], None]] = None,
+        cache_size: int = 48,
     ):
         if sd is None:  # pragma: no cover
             raise RuntimeError("sounddevice is not installed. Add sounddevice to enable audio playback.")
@@ -227,7 +229,8 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
         )
         self.sample_rate = sample_rate
         self.output_gain = output_gain
-        self._cache: Dict[str, np.ndarray] = {}
+        self.cache_size = max(1, int(cache_size))
+        self._cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
 
     def _apply_edge_fade(self, audio: np.ndarray, fade_seconds: float = 0.005) -> np.ndarray:
         arr = np.asarray(audio, dtype=np.float32).copy()
@@ -246,6 +249,11 @@ class SoundDeviceSequencePlayer(NoopSequencePlayer):
             audio, _ = librosa.load(Path(path), sr=self.sample_rate, mono=True)
             audio = (audio * self.output_gain).astype(np.float32)
             self._cache[path] = self._apply_edge_fade(audio)
+            self._cache.move_to_end(path)
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+            return self._cache[path]
+        self._cache.move_to_end(path)
         return self._cache[path]
 
     def warmup(self, paths: Sequence[str] | None = None) -> None:

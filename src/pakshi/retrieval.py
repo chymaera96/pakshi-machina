@@ -425,7 +425,9 @@ class FaissFlatL2Index:
 
 class NumpyFlatL2Index:
     def __init__(self, embeddings: np.ndarray):
-        arr = np.asarray(embeddings, dtype=np.float32)
+        arr = np.asanyarray(embeddings)
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32)
         if arr.ndim != 2:
             raise ValueError(f"Expected 2D array, got {arr.shape}")
         self.embeddings = arr

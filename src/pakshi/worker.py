@@ -89,6 +89,7 @@ class SegmentedPhraseWorker:
                 on_started=self._emit_segment_started,
                 on_finished=self._emit_segment_finished,
                 on_sequence_finished=self._emit_sequence_finished,
+                cache_size=self.config.playback_clip_cache_size,
             )
         except Exception:
             return NoopSequencePlayer(
